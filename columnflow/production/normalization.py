@@ -318,6 +318,11 @@ def normalization_weights_setup(
             if self.config_inst.campaign.ecm not in process_inst.xsecs.keys():
                 continue
             sum_weights = merged_selection_stats["sum_mc_weight_per_process"][str(process_inst.id)]
+            #quick fix that need to be fixed
+            ################################
+            #n_evt_per_file = /self.dataset_inst.n_files
+            sum_weights = self.dataset_inst.n_events
+            ################################
             xsec = process_inst.get_xsec(self.config_inst.campaign.ecm).nominal
             process_weight_table[0, process_inst.id] = lumi * xsec / sum_weights
 
