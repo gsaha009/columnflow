@@ -10,6 +10,7 @@ from abc import abstractmethod
 
 import luigi
 import law
+import order as od
 
 from columnflow.tasks.framework.base import (
     Requirements, AnalysisTask, DatasetTask, ShiftTask, wrapper_factory, RESOLVE_DEFAULT,
@@ -20,8 +21,9 @@ from columnflow.tasks.framework.mixins import (
 from columnflow.tasks.framework.plotting import (
     PlotBase, PlotBase1D, PlotBase2D, ProcessPlotSettingMixin, VariablePlotSettingMixin,
 )
-from columnflow.tasks.framework.decorators import view_output_plots
 from columnflow.tasks.framework.remote import RemoteWorkflow
+from columnflow.tasks.framework.decorators import view_output_plots
+from columnflow.tasks.framework.parameters import last_edge_inclusive_inst
 from columnflow.tasks.selection import MergeSelectionMasks
 from columnflow.util import DotDict, dev_sandbox
 
@@ -91,7 +93,7 @@ class CreateCutflowHistograms(
         import hist
         import numpy as np
         import awkward as ak
-        from columnflow.columnar_util import Route, add_ak_aliases
+        from columnflow.columnar_util import Route, add_ak_aliases, fill_hist
 
         # prepare inputs and outputs
         inputs = self.input()
@@ -203,11 +205,12 @@ class CreateCutflowHistograms(
                     return point
 
                 # fill the raw point
-                fill_kwargs = get_point()
-                arrays = ak.flatten(ak.cartesian(fill_kwargs))
-                histograms[var_key].fill(
-                    step=self.initial_step,
-                    **{field: arrays[field] for field in arrays.fields},
+                fill_data = get_point()
+                fill_hist(
+                    histograms[var_key],
+                    fill_data,
+                    fill_kwargs={"step": self.initial_step},
+                    last_edge_inclusive=self.last_edge_inclusive,
                 )
 
                 # fill all other steps
@@ -219,11 +222,12 @@ class CreateCutflowHistograms(
                         )
                     # incrementally update the mask and fill the point
                     mask = mask & arr.steps[step]
-                    fill_kwargs = get_point(mask)
-                    arrays = ak.flatten(ak.cartesian(fill_kwargs))
-                    histograms[var_key].fill(
-                        step=step,
-                        **{field: arrays[field] for field in arrays.fields},
+                    fill_data = get_point(mask)
+                    fill_hist(
+                        histograms[var_key],
+                        fill_data,
+                        fill_kwargs={"step": step},
+                        last_edge_inclusive=self.last_edge_inclusive,
                     )
 
         # dump the histograms
@@ -326,21 +330,35 @@ class PlotCutflow(
             for d in self.datasets
         }
 
+    def plot_parts(self) -> law.util.InsertableDict:
+        parts = super().plot_parts()
+        parts["category"] = f"cat_{self.branch_data}"
+        return parts
+
     def output(self):
-        return {"plots": [
-            self.target(name)
-            for name in self.get_plot_names(f"cutflow__cat_{self.branch_data}")
-        ]}
+        return {
+            "plots": [self.target(name) for name in self.get_plot_names("cutflow")],
+        }
 
     @law.decorator.log
     @view_output_plots
     def run(self):
         import hist
 
+        # copy process instances once so that their auxiliary data fields can be used as a storage
+        # for process-specific plot parameters later on in plot scripts without affecting the
+        # original instances
+        fake_root = od.Process(
+            name=f"{hex(id(object()))[2:]}",
+            id="+",
+            processes=list(map(self.config_inst.get_process, self.processes)),
+        ).copy()
+        process_insts = list(fake_root.processes)
+        fake_root.processes.clear()
+
         # prepare config objects
         category_inst = self.config_inst.get_category(self.branch_data)
         leaf_category_insts = category_inst.get_leaf_categories() or [category_inst]
-        process_insts = list(map(self.config_inst.get_process, self.processes))
         sub_process_insts = {
             proc: [sub for sub, _, _ in proc.walk_processes(include_self=True)]
             for proc in process_insts
@@ -362,28 +380,22 @@ class PlotCutflow(
                 # loop and extract one histogram per process
                 for process_inst in process_insts:
                     # skip when the dataset is already known to not contain any sub process
-                    if not any(map(dataset_inst.has_process, sub_process_insts[process_inst])):
+                    if not any(
+                        dataset_inst.has_process(sub_process_inst.name)
+                        for sub_process_inst in sub_process_insts[process_inst]
+                    ):
                         continue
 
-                    # work on a copy
+                    # select processes and reduce axis
                     h = h_in.copy()
-
-                    # axis selections
                     h = h[{
                         "process": [
                             hist.loc(p.id)
                             for p in sub_process_insts[process_inst]
                             if p.id in h.axes["process"]
                         ],
-                        "category": [
-                            hist.loc(c.id)
-                            for c in leaf_category_insts
-                            if c.id in h.axes["category"]
-                        ],
                     }]
-
-                    # axis reductions
-                    h = h[{"process": sum, "category": sum, self.variable: sum}]
+                    h = h[{"process": sum}]
 
                     # add the histogram
                     if process_inst in hists:
@@ -395,11 +407,23 @@ class PlotCutflow(
             if not hists:
                 raise Exception("no histograms found to plot")
 
-            # sort hists by process order
-            hists = OrderedDict(
-                (process_inst.copy_shallow(), hists[process_inst])
-                for process_inst in sorted(hists, key=process_insts.index)
-            )
+            # axis selections and reductions, including sorting by process order
+            _hists = OrderedDict()
+            for process_inst in sorted(hists, key=process_insts.index):
+                h = hists[process_inst]
+                # selections
+                h = h[{
+                    "category": [
+                        hist.loc(c.id)
+                        for c in leaf_category_insts
+                        if c.id in h.axes["category"]
+                    ],
+                }]
+                # reductions
+                h = h[{"category": sum, self.variable: sum}]
+                # store
+                _hists[process_inst] = h
+            hists = _hists
 
             # call the plot function
             fig, _ = self.call_plot_func(
@@ -499,7 +523,18 @@ class PlotCutflowVariablesBase(
     def run(self):
         import hist
 
-        # prepare config objects
+        # copy process instances once so that their auxiliary data fields can be used as a storage
+        # for process-specific plot parameters later on in plot scripts without affecting the
+        # original instances
+        fake_root = od.Process(
+            name=f"{hex(id(object()))[2:]}",
+            id="+",
+            processes=list(map(self.config_inst.get_process, self.processes)),
+        ).copy()
+        process_insts = list(fake_root.processes)
+        fake_root.processes.clear()
+
+        # prepare other config objects
         variable_tuple = self.variable_tuples[self.branch_data.variable]
         variable_insts = [
             self.config_inst.get_variable(var_name)
@@ -507,13 +542,12 @@ class PlotCutflowVariablesBase(
         ]
         category_inst = self.config_inst.get_category(self.branch_data.category)
         leaf_category_insts = category_inst.get_leaf_categories() or [category_inst]
-        process_insts = list(map(self.config_inst.get_process, self.processes))
         sub_process_insts = {
-            proc: [sub for sub, _, _ in proc.walk_processes(include_self=True)]
-            for proc in process_insts
+            process_inst: [sub for sub, _, _ in process_inst.walk_processes(include_self=True)]
+            for process_inst in process_insts
         }
 
-        # histogram data per process
+        # histogram data per process copy
         hists = {}
 
         with self.publish_step(f"plotting {self.branch_data.variable} in {category_inst.name}"):
@@ -529,28 +563,22 @@ class PlotCutflowVariablesBase(
                 # loop and extract one histogram per process
                 for process_inst in process_insts:
                     # skip when the dataset is already known to not contain any sub process
-                    if not any(map(dataset_inst.has_process, sub_process_insts[process_inst])):
+                    if not any(
+                        dataset_inst.has_process(sub_process_inst.name)
+                        for sub_process_inst in sub_process_insts[process_inst]
+                    ):
                         continue
 
-                    # work on a copy
+                    # select processes and reduce axis
                     h = h_in.copy()
-
-                    # axis selections
                     h = h[{
                         "process": [
                             hist.loc(p.id)
                             for p in sub_process_insts[process_inst]
                             if p.id in h.axes["process"]
                         ],
-                        "category": [
-                            hist.loc(c.id)
-                            for c in leaf_category_insts
-                            if c.id in h.axes["category"]
-                        ],
                     }]
-
-                    # axis reductions
-                    h = h[{"process": sum, "category": sum}]
+                    h = h[{"process": sum}]
 
                     # add the histogram
                     if process_inst in hists:
@@ -562,11 +590,23 @@ class PlotCutflowVariablesBase(
             if not hists:
                 raise Exception("no histograms found to plot")
 
-            # sort hists by process order
-            hists = OrderedDict(
-                (process_inst, hists[process_inst])
-                for process_inst in sorted(hists, key=process_insts.index)
-            )
+            # axis selections and reductions, including sorting by process order
+            _hists = OrderedDict()
+            for process_inst in sorted(hists, key=process_insts.index):
+                h = hists[process_inst]
+                # selections
+                h = h[{
+                    "category": [
+                        hist.loc(c.id)
+                        for c in leaf_category_insts
+                        if c.id in h.axes["category"]
+                    ],
+                }]
+                # reductions
+                h = h[{"category": sum}]
+                # store
+                _hists[process_inst] = h
+            hists = _hists
 
             # call a postprocess function that produces outputs based on the implementation of the daughter task
             self.run_postprocess(
@@ -582,9 +622,8 @@ class PlotCutflowVariables1D(
 ):
     plot_function = PlotBase.plot_function.copy(
         default=law.NO_STR,
-        description=(
-            PlotBase.plot_function.description + "; the default is resolved based on the --per-plot parameter."
-        ),
+        description=PlotBase.plot_function.description + "; the default is resolved based on the "
+        "--per-plot parameter",
         allow_empty=True,
     )
     plot_function_processes = "columnflow.plotting.plot_functions_1d.plot_variable_per_process"
@@ -598,25 +637,32 @@ class PlotCutflowVariables1D(
         "default: processes",
     )
 
+    def plot_parts(self) -> law.util.InsertableDict:
+        parts = super().plot_parts()
+        parts["category"] = f"cat_{self.branch_data.category}"
+        parts["variable"] = f"var_{self.branch_data.variable}"
+        return parts
+
     def output(self):
-        b = self.branch_data
         if self.per_plot == "processes":
-            return {"plots": law.SiblingFileCollection({
-                s: [
-                    self.local_target(name) for name in self.get_plot_names(
-                        f"plot__step{i}_{s}__proc_{self.processes_repr}__cat_{b.category}__var_{b.variable}",
-                    )
-                ]
-                for i, s in enumerate(self.chosen_steps)
-            })}
-        else:  # per_plot == "steps"
-            return {"plots": law.SiblingFileCollection({
-                p: [
-                    self.local_target(name)
-                    for name in self.get_plot_names(f"plot__proc_{p}__cat_{b.category}__var_{b.variable}")
-                ]
+            return {
+                "plots": law.SiblingFileCollection({
+                    s: [
+                        self.local_target(name) for name in self.get_plot_names(
+                            f"plot__step{i}_{s}__proc_{self.processes_repr}",
+                        )
+                    ]
+                    for i, s in enumerate(self.chosen_steps)
+                }),
+            }
+
+        # per_plot == "steps"
+        return {
+            "plots": law.SiblingFileCollection({
+                p: [self.local_target(name) for name in self.get_plot_names(f"plot__proc_{p}")]
                 for p in self.processes
-            })}
+            }),
+        }
 
     def run_postprocess(self, hists, category_inst, variable_insts):
         # resolve plot function
@@ -685,16 +731,20 @@ class PlotCutflowVariables2D(
         add_default_to_description=True,
     )
 
+    def plot_parts(self) -> law.util.InsertableDict:
+        parts = super().plot_parts()
+        parts["processes"] = self.processes_repr
+        parts["category"] = f"cat_{self.branch_data.category}"
+        parts["variable"] = f"var_{self.branch_data.variable}"
+        return parts
+
     def output(self):
-        b = self.branch_data
-        return {"plots": law.SiblingFileCollection({
-            s: [
-                self.local_target(name) for name in self.get_plot_names(
-                    f"plot__step{i}_{s}__proc_{self.processes_repr}__cat_{b.category}__var_{b.variable}",
-                )
-            ]
-            for i, s in enumerate(self.chosen_steps)
-        })}
+        return {
+            "plots": law.SiblingFileCollection({
+                s: [self.local_target(name) for name in self.get_plot_names(f"plot__step{i}_{s}")]
+                for i, s in enumerate(self.chosen_steps)
+            }),
+        }
 
     def run_postprocess(self, hists, category_inst, variable_insts):
         import hist

@@ -421,6 +421,7 @@ class DatacardWriter(object):
         # iterate through shapes
         for cat_name, hists in self.histograms.items():
             cat_obj = self.inference_model_inst.get_category(cat_name)
+
             _rates = rates[cat_name] = OrderedDict()
             _effects = effects[cat_name] = OrderedDict()
             for proc_name, _hists in hists.items():

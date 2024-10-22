@@ -420,12 +420,19 @@ cf_setup_interactive() {
     #   1. The name of the setup. "default" triggers a setup with good defaults, avoiding all
     #      queries to the user and the writing of a custom setup file.
     #   2. The location of the setup file when a custom, named setup was triggered.
+    #
+    # Optionally preconfigured environment variables:
+    #   CF_SKIP_BANNER
+    #       When "1", the "columnflow" banner is not shown.
 
     local setup_name="${1}"
     local env_file="${2}"
     local env_file_tmp="${env_file}.tmp"
     local setup_is_default="false"
     [ "${setup_name}" = "default" ] && setup_is_default="true"
+
+    # optionally show the banner
+    [ "${CF_SKIP_BANNER}" != "1" ] && cf_show_banner
 
     # when the setup already exists and it's not the default one,
     # source the corresponding env file and stop

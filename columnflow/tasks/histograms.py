@@ -12,10 +12,11 @@ import law
 from columnflow.tasks.framework.base import Requirements, AnalysisTask, DatasetTask, wrapper_factory
 from columnflow.tasks.framework.mixins import (
     CalibratorsMixin, SelectorStepsMixin, ProducersMixin, MLModelsMixin, VariablesMixin,
-    ShiftSourcesMixin, EventWeightMixin, ChunkedIOMixin,
+    ShiftSourcesMixin, WeightProducerMixin, ChunkedIOMixin,
 )
 from columnflow.tasks.framework.remote import RemoteWorkflow
-from columnflow.tasks.reduction import MergeReducedEventsUser, MergeReducedEvents
+from columnflow.tasks.framework.parameters import last_edge_inclusive_inst
+from columnflow.tasks.reduction import ReducedEventsUser
 from columnflow.tasks.production import ProduceColumns
 from columnflow.tasks.ml import MLEvaluation
 from columnflow.util import dev_sandbox
@@ -23,23 +24,22 @@ from columnflow.util import dev_sandbox
 
 class CreateHistograms(
     VariablesMixin,
+    WeightProducerMixin,
     MLModelsMixin,
     ProducersMixin,
-    SelectorStepsMixin,
-    CalibratorsMixin,
-    EventWeightMixin,
+    ReducedEventsUser,
     ChunkedIOMixin,
-    MergeReducedEventsUser,
     law.LocalWorkflow,
     RemoteWorkflow,
 ):
+    last_edge_inclusive = last_edge_inclusive_inst
+
     sandbox = dev_sandbox(law.config.get("analysis", "default_columnar_sandbox"))
 
     # upstream requirements
     reqs = Requirements(
-        MergeReducedEventsUser.reqs,
+        ReducedEventsUser.reqs,
         RemoteWorkflow.reqs,
-        MergeReducedEvents=MergeReducedEvents,
         ProduceColumns=ProduceColumns,
         MLEvaluation=MLEvaluation,
     )
@@ -63,7 +63,7 @@ class CreateHistograms(
         reqs = super().workflow_requires()
 
         # require the full merge forest
-        reqs["events"] = self.reqs.MergeReducedEvents.req(self, tree_index=-1)
+        reqs["events"] = self.reqs.ProvideReducedEvents.req(self)
 
         if not self.pilot:
             if self.producer_insts:
@@ -84,9 +84,7 @@ class CreateHistograms(
         return reqs
 
     def requires(self):
-        reqs = {
-            "events": self.reqs.MergeReducedEvents.req(self, tree_index=self.branch, _exclude={"branch"}),
-        }
+        reqs = {"events": self.reqs.ProvideReducedEvents.req(self)}
 
         if self.producer_insts:
             reqs["producers"] = [
@@ -105,11 +103,11 @@ class CreateHistograms(
 
         return reqs
 
-    @MergeReducedEventsUser.maybe_dummy
+    workflow_condition = ReducedEventsUser.workflow_condition.copy()
+
+    @workflow_condition.output
     def output(self):
-        return {
-            "hists": self.target(f"histograms__vars_{self.variables_repr}__{self.branch}.pickle"),
-        }
+        return {"hists": self.target(f"histograms__vars_{self.variables_repr}__{self.branch}.pickle")}
 
     @law.decorator.log
     @law.decorator.localize(input=True, output=False)
@@ -118,7 +116,9 @@ class CreateHistograms(
         import hist
         import numpy as np
         import awkward as ak
-        from columnflow.columnar_util import Route, update_ak_array, add_ak_aliases, has_ak_column
+        from columnflow.columnar_util import (
+            Route, update_ak_array, add_ak_aliases, has_ak_column, fill_hist,
+        )
 
         # prepare inputs
         inputs = self.input()
@@ -138,7 +138,10 @@ class CreateHistograms(
         aliases = self.local_shift_inst.x("column_aliases", {})
 
         # define columns that need to be read
-        read_columns = {"process_id"} | set(self.category_id_columns) | set(aliases.values())
+        read_columns = {Route("process_id")}
+        read_columns |= set(map(Route, self.category_id_columns))
+        read_columns |= set(self.weight_producer_inst.used_columns)
+        read_columns |= set(map(Route, aliases.values()))
         read_columns |= {
             Route(inp)
             for variable_inst in (
@@ -152,28 +155,16 @@ class CreateHistograms(
                 else variable_inst.x("inputs", [])
             )
         }
-        if self.dataset_inst.is_mc:
-            read_columns |= {Route(column) for column in self.config_inst.x.event_weights}
-            read_columns |= {Route(column) for column in self.dataset_inst.x("event_weights", [])}
-        read_columns = {Route(c) for c in read_columns}
 
         # empty float array to use when input files have no entries
         empty_f32 = ak.Array(np.array([], dtype=np.float32))
 
         # iterate over chunks of events and diffs
-        files = [inputs["events"]["collection"][0]["events"].path]
+        file_targets = [inputs["events"]["events"]]
         if self.producer_insts:
-            files.extend([inp["columns"].path for inp in inputs["producers"]])
+            file_targets.extend([inp["columns"] for inp in inputs["producers"]])
         if self.ml_model_insts:
-            files.extend([inp["mlcolumns"].path for inp in inputs["ml"]])
-        for (events, *columns), pos in self.iter_chunked_io(
-            files,
-            source_type=len(files) * ["awkward_parquet"],
-            read_columns=len(files) * [read_columns],
-        ):
-            # optional check for overlapping inputs
-            if self.check_overlapping_inputs:
-                self.raise_if_overlapping([events] + list(columns))
+            file_targets.extend([inp["mlcolumns"] for inp in inputs["ml"]])
 
         # prepare inputs for localization
         with law.localize_file_targets(
@@ -190,55 +181,15 @@ class CreateHistograms(
                 if self.check_overlapping_inputs:
                     self.raise_if_overlapping([events] + list(columns))
 
-            # add aliases
-            events = add_ak_aliases(
-                events,
-                aliases,
-                remove_src=True,
-                missing_strategy=self.missing_column_alias_strategy,
-            )
+                # add additional columns
+                events = update_ak_array(events, *columns)
 
-            # build the full event weight
-            weight = ak.Array(np.ones(len(events)))
-            if self.dataset_inst.is_mc and len(events):
-                for column in self.config_inst.x.event_weights:
-                    weight = weight * Route(column).apply(events)
-                for column in self.dataset_inst.x("event_weights", []):
-                    if has_ak_column(events, column):
-                        weight = weight * Route(column).apply(events)
-                    else:
-                        self.logger.warning_once(
-                            f"missing_dataset_weight_{column}",
-                            f"weight '{column}' for dataset {self.dataset_inst.name} not found",
-                        )
-
-            # define and fill histograms, taking into account multiple axes
-            for var_key, var_names in self.variable_tuples.items():
-                # get variable instances
-                variable_insts = [self.config_inst.get_variable(var_name) for var_name in var_names]
-
-                # create the histogram if not present yet
-                if var_key not in histograms:
-                    h = (
-                        hist.Hist.new
-                        .IntCat([], name="category", growth=True)
-                        .IntCat([], name="process", growth=True)
-                        .IntCat([], name="shift", growth=True)
-                    )
-                    # add variable axes
-                    for variable_inst in variable_insts:
-                        h = h.Var(
-                            variable_inst.bin_edges,
-                            name=variable_inst.name,
-                            label=variable_inst.get_full_x_title(),
-                        )
-                    # enable weights and store it
-                    histograms[var_key] = h.Weight()
-
-                # merge category ids
-                category_ids = ak.concatenate(
-                    [Route(c).apply(events) for c in self.category_id_columns],
-                    axis=-1,
+                # add aliases
+                events = add_ak_aliases(
+                    events,
+                    aliases,
+                    remove_src=True,
+                    missing_strategy=self.missing_column_alias_strategy,
                 )
 
                 # build the full event weight
@@ -247,9 +198,60 @@ class CreateHistograms(
                 else:
                     weight = ak.Array(np.ones(len(events), dtype=np.float32))
 
-                # broadcast and fill
-                arrays = ak.flatten(ak.cartesian(fill_kwargs))
-                histograms[var_key].fill(**{field: arrays[field] for field in arrays.fields})
+                # define and fill histograms, taking into account multiple axes
+                for var_key, var_names in self.variable_tuples.items():
+                    # get variable instances
+                    variable_insts = [self.config_inst.get_variable(var_name) for var_name in var_names]
+
+                    # create the histogram if not present yet
+                    if var_key not in histograms:
+                        h = (
+                            hist.Hist.new
+                            .IntCat([], name="category", growth=True)
+                            .IntCat([], name="process", growth=True)
+                            .IntCat([], name="shift", growth=True)
+                        )
+                        # add variable axes
+                        for variable_inst in variable_insts:
+                            h = h.Var(
+                                variable_inst.bin_edges,
+                                name=variable_inst.name,
+                                label=variable_inst.get_full_x_title(),
+                            )
+                        # enable weights and store it
+                        histograms[var_key] = h.Weight()
+
+                    # merge category ids
+                    category_ids = ak.concatenate(
+                        [Route(c).apply(events) for c in self.category_id_columns],
+                        axis=-1,
+                    )
+
+                    # broadcast arrays so that each event can be filled for all its categories
+                    fill_data = {
+                        "category": category_ids,
+                        "process": events.process_id,
+                        "shift": np.ones(len(events), dtype=np.int32) * self.global_shift_inst.id,
+                        "weight": weight,
+                    }
+                    for variable_inst in variable_insts:
+                        # prepare the expression
+                        expr = variable_inst.expression
+                        if isinstance(expr, str):
+                            route = Route(expr)
+                            def expr(events, *args, **kwargs):
+                                if len(events) == 0 and not has_ak_column(events, route):
+                                    return empty_f32
+                                return route.apply(events, null_value=variable_inst.null_value)
+                        # apply it
+                        fill_data[variable_inst.name] = expr(events)
+
+                    # fill it
+                    fill_hist(
+                        histograms[var_key],
+                        fill_data,
+                        last_edge_inclusive=self.last_edge_inclusive,
+                    )
 
         # merge output files
         self.output()["hists"].dump(histograms, formatter="pickle")
@@ -272,6 +274,7 @@ CreateHistogramsWrapper = wrapper_factory(
 
 class MergeHistograms(
     VariablesMixin,
+    WeightProducerMixin,
     MLModelsMixin,
     ProducersMixin,
     SelectorStepsMixin,
@@ -298,6 +301,12 @@ class MergeHistograms(
         RemoteWorkflow.reqs,
         CreateHistograms=CreateHistograms,
     )
+
+    @classmethod
+    def req_params(cls, inst: AnalysisTask, **kwargs) -> dict:
+        _prefer_cli = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"variables"}
+        kwargs["_prefer_cli"] = _prefer_cli
+        return super().req_params(inst, **kwargs)
 
     def create_branch_map(self):
         # create a dummy branch map so that this task could be submitted as a job
@@ -384,6 +393,7 @@ MergeHistogramsWrapper = wrapper_factory(
 class MergeShiftedHistograms(
     VariablesMixin,
     ShiftSourcesMixin,
+    WeightProducerMixin,
     MLModelsMixin,
     ProducersMixin,
     SelectorStepsMixin,

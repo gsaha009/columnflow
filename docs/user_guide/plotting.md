@@ -1,12 +1,20 @@
 # Plotting
 
-This section showcases how to use the various plotting tasks in columnflow.
+In columnflow, there are multiple tasks to create plots.
+This section showcases how to create and customize a plot based on the {py:class}`~columnflow.tasks.plotting.PlotVariables1D` task.
+The usage of other plotting tasks is mostly analogous to the ```PlotVariables1D``` task.
+The most important differences compared to ```PlotVariables1D``` are presented in a separate section for each of the other plotting tasks.
+An overview of all plotting tasks is given in the [Plotting tasks](../task_overview/plotting_tasks.md) section.
 
-Note: which tasks, how to trigger them, ALL POSSIBLE PARAMETERS!!, variables
+## Creating your first plot
 
-TODO
+Assuming you used the analysis template to setup your analysis, you can create a first plot by running
 
-## Variables creation
+```shell
+law run cf.PlotVariables1D --version v1 \
+    --calibrators example --selector example --producer example \
+    --processes data,tt,st --variables n_jet --categories incl,2j
+```
 
 This will run the full analysis chain for the given processes (data, tt, st) and should create plots looking like this:
 

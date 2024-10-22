@@ -15,7 +15,8 @@ import law
 import order as od
 import scinum as sn
 
-from columnflow.util import maybe_import, try_int
+from columnflow.util import maybe_import, try_int, try_complex
+from columnflow.types import Iterable, Any, Callable
 
 math = maybe_import("math")
 hist = maybe_import("hist")
@@ -141,35 +142,54 @@ def apply_settings(
     """
     applies settings from `settings` dictionary to a list of order objects `containers`
 
-    :param containers: list of order objects
-    :param settings: dictionary of settings to apply on the *containers*. Each key should correspond
-        to the name of a container and each value should be a dictionary. The inner dictionary contains
-        keys and values that will be applied on the corresponding container either as an attribute
-        or alternatively as an auxiliary.
+    :param instances: List of order instances to apply settings to.
+    :param settings: Dictionary of settings to apply on the instances. Each key should correspond
+        to the name of an instance and each value should be a dictionary with attributes that will
+        be set on the instance either as a attribute or as an auxiliary.
+    :param parent_check: Function that checks if an instance has a parent with a given name.
     """
     if not settings:
         return
 
-    for inst in containers:
-        inst_settings = settings.get(inst.name, {})
-        for setting_key, setting_value in inst_settings.items():
-            try:
-                setattr(inst, setting_key, setting_value)
-            except AttributeError:
-                inst.set_aux(setting_key, setting_value)
+    for inst in instances:
+        for name, inst_settings in (settings or {}).items():
+            if inst != name and not (callable(parent_check) and parent_check(inst, name)):
+                continue
+            for key, value in inst_settings.items():
+                # try attribute first, otherwise auxiliary entry
+                try:
+                    setattr(inst, key, value)
+                except (AttributeError, ValueError):
+                    inst.set_aux(key, value)
 
 
 def apply_process_settings(
-        hists: dict,
-        process_settings: dict | None = None,
+    hists: dict,
+    process_settings: dict | None = None,
 ) -> dict:
     """
     applies settings from `process_settings` dictionary to the `process_insts`;
     the `scale` setting is directly applied to the histograms
     """
     # apply all settings on process insts
-    process_insts = hists.keys()
-    apply_settings(process_insts, process_settings)
+    apply_settings(
+        hists.keys(),
+        process_settings,
+        parent_check=(lambda proc, parent_name: proc.has_parent_process(parent_name)),
+    )
+
+    # helper to compute the stack integral
+    stack_integral = None
+
+    def get_stack_integral() -> float:
+        nonlocal stack_integral
+        if stack_integral is None:
+            stack_integral = sum(
+                proc_h.sum().value
+                for proc, proc_h in hists.items()
+                if not hasattr(proc, "unstack") and not proc.is_data
+            )
+        return stack_integral
 
     for proc_inst, h in hists.items():
         # apply "scale" setting directly to the hists
@@ -194,19 +214,20 @@ def apply_process_settings(
 
 
 def apply_variable_settings(
-        hists: dict,
-        variable_insts: list[od.Variable],
-        variable_settings: dict | None = None,
+    hists: dict,
+    variable_insts: list[od.Variable],
+    variable_settings: dict | None = None,
 ) -> dict:
     """
-    applies settings from `variable_settings` dictionary to the `variable_insts`;
-    the `rebin` setting is directly applied to the histograms
+    applies settings from *variable_settings* dictionary to the *variable_insts*;
+    the *rebin*, *overflow*, *underflow*, and *slice* settings are directly applied to the histograms
     """
     # apply all settings on variable insts
     apply_settings(variable_insts, variable_settings)
 
-    # apply rebinning setting directly to histograms
+    # apply certain  setting directly to histograms
     for var_inst in variable_insts:
+        # rebinning
         rebin_factor = getattr(var_inst, "rebin", None) or var_inst.x("rebin", None)
         if try_int(rebin_factor):
             for proc_inst, h in list(hists.items()):
@@ -360,7 +381,7 @@ def prepare_style_config(
         "legend_cfg": {},
         "annotate_cfg": {"text": category_inst.label},
         "cms_label_cfg": {
-            "lumi": config_inst.x.luminosity.get("nominal") / 1000,  # pb -> fb
+            "lumi": round(0.001 * config_inst.x.luminosity.get("nominal"), 2),  # /pb -> /fb
             "com": config_inst.campaign.ecm,
         },
     }
@@ -424,7 +445,7 @@ def prepare_plot_config(
     # setup plotting configs
     plot_config = OrderedDict()
 
-    # draw stack + error bands
+    # draw stack
     if h_mc_stack is not None:
         mc_norm = sum(h_mc.values()) if shape_norm else 1
         plot_config["mc_stack"] = {
@@ -438,13 +459,6 @@ def prepare_plot_config(
                 "linewidth": [(0 if c is None else 1) for c in mc_colors[::-1]],
             },
         }
-        if not hide_errors:
-            plot_config["mc_uncert"] = {
-                "method": "draw_error_bands",
-                "hist": h_mc,
-                "kwargs": {"norm": mc_norm, "label": "MC stat. unc."},
-                "ratio_kwargs": {"norm": h_mc.values()},
-            }
 
     # draw lines
     for i, h in enumerate(line_hists):
@@ -468,6 +482,16 @@ def prepare_plot_config(
             for key in ("kwargs", "ratio_kwargs"):
                 if key in plot_cfg:
                     plot_cfg[key]["yerr"] = False
+
+    # draw stack error
+    if h_mc_stack is not None and not hide_errors:
+        mc_norm = sum(h_mc.values()) if shape_norm else 1
+        plot_config["mc_uncert"] = {
+            "method": "draw_error_bands",
+            "hist": h_mc,
+            "kwargs": {"norm": mc_norm, "label": "MC stat. unc."},
+            "ratio_kwargs": {"norm": h_mc.values()},
+        }
 
     # draw data
     if data_hists:

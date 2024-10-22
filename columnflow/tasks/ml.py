@@ -25,9 +25,10 @@ from columnflow.tasks.framework.mixins import (
 from columnflow.tasks.framework.plotting import ProcessPlotSettingMixin, PlotBase
 from columnflow.tasks.framework.remote import RemoteWorkflow
 from columnflow.tasks.framework.decorators import view_output_plots
-from columnflow.tasks.reduction import MergeReducedEventsUser, MergeReducedEvents
+from columnflow.tasks.reduction import ReducedEventsUser
 from columnflow.tasks.production import ProduceColumns
 from columnflow.util import dev_sandbox, safe_div, DotDict, maybe_import
+from columnflow.columnar_util import set_ak_column
 
 
 ak = maybe_import("awkward")
@@ -36,10 +37,8 @@ ak = maybe_import("awkward")
 class PrepareMLEvents(
     MLModelDataMixin,
     ProducersMixin,
-    SelectorMixin,
-    CalibratorsMixin,
     ChunkedIOMixin,
-    MergeReducedEventsUser,
+    ReducedEventsUser,
     law.LocalWorkflow,
     RemoteWorkflow,
 ):
@@ -49,9 +48,8 @@ class PrepareMLEvents(
 
     # upstream requirements
     reqs = Requirements(
-        MergeReducedEventsUser.reqs,
+        ReducedEventsUser.reqs,
         RemoteWorkflow.reqs,
-        MergeReducedEvents=MergeReducedEvents,
         ProduceColumns=ProduceColumns,
     )
 
@@ -105,7 +103,7 @@ class PrepareMLEvents(
         reqs = super().workflow_requires()
 
         # require the full merge forest
-        reqs["events"] = self.reqs.MergeReducedEvents.req(self, tree_index=-1)
+        reqs["events"] = self.reqs.ProvideReducedEvents.req(self)
 
         # add producer dependent requirements
         if self.preparation_producer_inst:
@@ -122,9 +120,8 @@ class PrepareMLEvents(
         return reqs
 
     def requires(self):
-        reqs = {
-            "events": self.reqs.MergeReducedEvents.req(self, tree_index=self.branch, _exclude={"branch"}),
-        }
+        reqs = {"events": self.reqs.ProvideReducedEvents.req(self)}
+
         if self.preparation_producer_inst:
             reqs["preparation_producer"] = self.preparation_producer_inst.run_requires()
 
@@ -137,7 +134,9 @@ class PrepareMLEvents(
 
         return reqs
 
-    @MergeReducedEventsUser.maybe_dummy
+    workflow_condition = ReducedEventsUser.workflow_condition.copy()
+
+    @workflow_condition.output
     def output(self):
         k = self.ml_model_inst.folds
         outputs = {
@@ -195,11 +194,9 @@ class PrepareMLEvents(
         num_fold_events = {f: 0 for f in range(self.ml_model_inst.folds)}
 
         # iterate over chunks of events and columns
-        files = [inputs["events"]["collection"][0]["events"]]
+        files = [inputs["events"]["events"]]
         if self.producer_insts:
             files.extend([inp["columns"] for inp in inputs["producers"]])
-        if reader_targets:
-            files.extend(reader_targets.values())
 
         # prepare inputs for localization
         with law.localize_file_targets(
@@ -228,15 +225,18 @@ class PrepareMLEvents(
                 )
 
                 # generate fold indices
-                fold_indices = events.deterministic_seed % self.ml_model_inst.folds
+                events = set_ak_column(events, "fold_indices", events.deterministic_seed % self.ml_model_inst.folds)
                 # invoke the optional producer
                 if len(events) and self.preparation_producer_inst:
                     events = self.preparation_producer_inst(
                         events,
                         stats=stats,
-                        fold_indices=fold_indices,
+                        fold_indices=events.fold_indices,
                         ml_model_inst=self.ml_model_inst,
                     )
+
+                # read fold_indices from events array to allow masking training events
+                fold_indices = events.fold_indices
 
                 # remove columns
                 events = route_filter(events)
@@ -424,8 +424,8 @@ class MergeMLEvents(
     def merge_workflow_requires(self):
         req = self.reqs.PrepareMLEvents.req(self, _exclude={"branches"})
 
-        # if the merging stats exist, allow the forest to be cached
-        self._cache_forest = req.merging_stats_exist
+        # if the workflow shape is known, allow the forest to be cached
+        self._cache_forest = req.workflow_condition()
 
         return req
 
@@ -596,10 +596,8 @@ class MLTraining(
 class MLEvaluation(
     MLModelMixin,
     ProducersMixin,
-    SelectorMixin,
-    CalibratorsMixin,
     ChunkedIOMixin,
-    MergeReducedEventsUser,
+    ReducedEventsUser,
     law.LocalWorkflow,
     RemoteWorkflow,
 ):
@@ -612,10 +610,9 @@ class MLEvaluation(
 
     # upstream requirements
     reqs = Requirements(
-        MergeReducedEventsUser.reqs,
+        ReducedEventsUser.reqs,
         RemoteWorkflow.reqs,
         MLTraining=MLTraining,
-        MergeReducedEvents=MergeReducedEvents,
         ProduceColumns=ProduceColumns,
     )
 
@@ -669,7 +666,7 @@ class MLEvaluation(
             producers=(self.producers,),
         )
 
-        reqs["events"] = self.reqs.MergeReducedEvents.req_different_branching(self)
+        reqs["events"] = self.reqs.ProvideReducedEvents.req(self)
 
         # add producer dependent requirements
         if self.preparation_producer_inst:
@@ -694,11 +691,7 @@ class MLEvaluation(
                 producers=(self.producers,),
                 branch=-1,
             ),
-            "events": self.reqs.MergeReducedEvents.req_different_branching(
-                self,
-                tree_index=self.branch,
-                branch=-1,
-            ),
+            "events": self.reqs.ProvideReducedEvents.req(self, _exclude=self.exclude_params_branch),
         }
         if self.preparation_producer_inst:
             reqs["preparation_producer"] = self.preparation_producer_inst.run_requires()
@@ -712,7 +705,9 @@ class MLEvaluation(
 
         return reqs
 
-    @MergeReducedEventsUser.maybe_dummy
+    workflow_condition = ReducedEventsUser.workflow_condition.copy()
+
+    @workflow_condition.output
     def output(self):
         return {"mlcolumns": self.target(f"mlcolumns_{self.branch}.parquet")}
 
@@ -771,21 +766,21 @@ class MLEvaluation(
         route_filter = RouteFilter(write_columns)
 
         # iterate over chunks of events and columns
-        files = [inputs["events"]["collection"][0]["events"]]
+        file_targets = [inputs["events"]["events"]]
         if self.producer_insts:
-            files.extend([inp["columns"] for inp in inputs["producers"]])
+            file_targets.extend([inp["columns"] for inp in inputs["producers"]])
         if reader_targets:
-            files.extend(reader_targets.values())
+            file_targets.extend(reader_targets.values())
 
         # prepare inputs for localization
         with law.localize_file_targets(
-            [*files, *reader_targets.values()],
+            [*file_targets, *reader_targets.values()],
             mode="r",
         ) as inps:
             for (events, *columns), pos in self.iter_chunked_io(
                 [inp.path for inp in inps],
-                source_type=len(files) * ["awkward_parquet"] + [None] * len(reader_targets),
-                read_columns=(len(files) + len(reader_targets)) * [read_columns],
+                source_type=len(file_targets) * ["awkward_parquet"] + [None] * len(reader_targets),
+                read_columns=(len(file_targets) + len(reader_targets)) * [read_columns],
             ):
                 # optional check for overlapping inputs
                 if self.check_overlapping_inputs:
@@ -803,14 +798,14 @@ class MLEvaluation(
                 )
 
                 # generate fold indices
-                fold_indices = events.deterministic_seed % self.ml_model_inst.folds
+                events = set_ak_column(events, "fold_indices", events.deterministic_seed % self.ml_model_inst.folds)
 
                 # invoke the optional producer
                 if len(events) and self.preparation_producer_inst:
                     events = self.preparation_producer_inst(
                         events,
                         stats=stats,
-                        fold_indices=fold_indices,
+                        fold_indices=events.fold_indices,
                         ml_model_inst=self.ml_model_inst,
                     )
 
@@ -819,7 +814,7 @@ class MLEvaluation(
                     self,
                     events,
                     models,
-                    fold_indices,
+                    events.fold_indices,
                     events_used_in_training=events_used_in_training,
                 )
 
@@ -1089,6 +1084,18 @@ class PlotMLResults(PlotMLResultsBase):
     receiver operating characteristic (ROC) curve. This task uses the output of the
     MergeMLEvaluation task as input and saves the plots with the corresponding array
     used to create the plot.
+
+    For the function to run correctly, the following input structure is required:
+    * The ``category_ids`` column must be kept in the Evaluation and passed with the network outputs.
+    (must be accessible via ``events.category_id`` and can be set by adding ``category_ids`` to the
+    :py:meth:`~columnflow.ml.MLModel.uses` and :py:meth:`~columnflow.ml.MLModel.produces`
+    methode of the ML-Model)
+    * The outputs of the ML model must be stored under a column with the name of the model itself
+    (This can be set in the :py:meth:`~columnflow.ml.MLModel.evaluate` methode of the model via:
+
+    ``events = set_ak_column(events, f"{self.cls_name}.{output_i}", output_i)``
+
+    ).
     """
 
     # override the plot_function parameter to be able to only choose between CM and ROC
@@ -1111,6 +1118,9 @@ class PlotMLResults(PlotMLResultsBase):
                 params.general_settings[label] = params.general_settings[label].split(";")
 
     def output(self: PlotMLResults):
+        """
+        override the output method to return the plots and the array used for plotting.
+        """
         b = self.branch_data
         return {
             "plots": [
@@ -1120,7 +1130,7 @@ class PlotMLResults(PlotMLResultsBase):
                 )
             ],
             "array": self.target(
-                f"plot__{self.plot_function}__proc_{self.processes_repr}__cat_{b.category}/data.parquet",
+                f"plot__{self.plot_function}__proc_{self.processes_repr}__cat_{b.category}/data.pickle",
             ),
         }
 

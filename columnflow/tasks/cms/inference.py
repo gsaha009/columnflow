@@ -4,7 +4,7 @@
 Tasks related to the creation of datacards for inference purposes.
 """
 
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 
 import law
 
@@ -127,22 +127,10 @@ class CreateDatacards(
         return reqs
 
     def requires(self):
-        # helper to find automatic datasets
-        def get_mc_datasets(proc_obj: dict) -> list[str]:
-            # when datasets are defined on the process object itself, return them
-            if proc_obj.config_mc_datasets:
-                return proc_obj.config_mc_datasets
-
-            # if not, check the config
-            return [
-                dataset_inst.name
-                for dataset_inst in get_datasets_from_process(self.config_inst, proc_obj.config_process)
-            ]
-
         cat_obj = self.branch_data
         reqs = {
             proc_obj.name: {
-                dataset: self.reqs.MergeShiftedHistograms.req(
+                dataset: self.reqs.MergeShiftedHistograms.req_different_branching(
                     self,
                     dataset=dataset,
                     shift_sources=tuple(
@@ -152,20 +140,20 @@ class CreateDatacards(
                     ),
                     variables=(cat_obj.config_variable,),
                     branch=-1,
-                    _exclude={"branches"},
+                    workflow="local",
                 )
-                for dataset in get_mc_datasets(proc_obj)
+                for dataset in self.get_mc_datasets(proc_obj)
             }
             for proc_obj in cat_obj.processes
         }
         if cat_obj.config_data_datasets:
             reqs["data"] = {
-                dataset: self.reqs.MergeHistograms.req(
+                dataset: self.reqs.MergeHistograms.req_different_branching(
                     self,
                     dataset=dataset,
                     variables=(cat_obj.config_variable,),
                     branch=-1,
-                    _exclude={"branches"},
+                    workflow="local",
                 )
                 for dataset in self.get_data_datasets(cat_obj)
             }
@@ -174,7 +162,7 @@ class CreateDatacards(
 
     def output(self):
         cat_obj = self.branch_data
-        basename = lambda name, ext: f"{name}__cat_{cat_obj.config_category}__var_{cat_obj.config_variable}.{ext}"
+        basename = lambda name, ext: f"{name}__cat_{cat_obj.name}__var_{cat_obj.config_variable}.{ext}"
 
         return {
             "card": self.target(basename("datacard", "txt")),
