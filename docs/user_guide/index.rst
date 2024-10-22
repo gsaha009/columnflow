@@ -6,7 +6,6 @@ User Guide
 
    structure.md
    building_blocks/index
-   sandbox.md
    ml.md
    plotting.md
    examples.md

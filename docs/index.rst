@@ -11,7 +11,6 @@
 
    start.md
    user_guide/index
-   task_overview/index
    api/index
 
 .. include:: ../README.md

@@ -6,7 +6,14 @@ Helpers and utilities for working with columnar libraries.
 
 from __future__ import annotations
 
-__all__ = []
+__all__ = [
+    "mandatory_coffea_columns", "ColumnCollection", "EMPTY_INT", "EMPTY_FLOAT",
+    "Route", "RouteFilter", "ArrayFunction", "TaskArrayFunction", "ChunkedIOHandler",
+    "eval_item", "get_ak_routes", "has_ak_column", "set_ak_column", "remove_ak_column",
+    "add_ak_alias", "add_ak_aliases", "update_ak_array", "flatten_ak_array", "sort_ak_fields",
+    "sorted_ak_to_parquet", "sorted_ak_to_root", "attach_behavior", "layout_ak_array",
+    "flat_np_view", "deferred_column", "optional_column",
+]
 
 import os
 import gc
@@ -40,7 +47,6 @@ maybe_import("coffea.nanoevents")
 maybe_import("coffea.nanoevents.methods.base")
 maybe_import("coffea.nanoevents.methods.nanoaod")
 pq = maybe_import("pyarrow.parquet")
-hist = maybe_import("hist")
 
 
 # loggers
@@ -364,15 +370,6 @@ class Route(od.TagMixin):
             return self.fields == tuple(other)
         if isinstance(other, str):
             return self.column == other
-        return False
-
-    def __lt__(self, other: Route | str | Sequence[str | int | slice | type(Ellipsis) | list]) -> bool:
-        if isinstance(other, Route):
-            return self.fields < other.fields
-        if isinstance(other, (list, tuple)):
-            return self.fields < tuple(other)
-        if isinstance(other, str):
-            return self.column < other
         return False
 
     def __bool__(self) -> bool:
@@ -1144,11 +1141,22 @@ def layout_ak_array(data_array: np.array | ak.Array, layout_array: ak.Array) -> 
     return ak.unflatten(ak.flatten(data_array, axis=None), ak.num(layout_array, axis=1), axis=0)
 
 
-def flat_np_view(ak_array: ak.Array, axis: int | None = None) -> np.array:
+def flat_np_view(ak_array: ak.Array, axis: int = 1) -> np.array:
     """
     Takes an *ak_array* and returns a fully flattened numpy view. The flattening is applied along
     *axis*. See *ak.flatten* for more info.
+
+    .. note::
+        Changes applied in-place to that view are transferred to the original *ak_array*, but
+        **only** when the axis is not *None* but an integer value. For this reason, passing
+        ``axis=None`` will cause an exception to be thrown.
     """
+    if axis is None:
+        raise ValueError(
+            "axis must not be None as changes applied the returned view will not propagate to the ",
+            "original awkward array",
+        )
+
     return np.asarray(ak.flatten(ak_array, axis=axis))
 
 
@@ -1159,61 +1167,6 @@ def ak_copy(ak_array: ak.Array) -> ak.Array:
     removed.
     """
     return layout_ak_array(np.array(ak.flatten(ak_array)), ak_array)
-
-
-def fill_hist(
-    h: hist.Hist,
-    data: ak.Array | np.array | dict[str, ak.Array | np.array],
-    *,
-    last_edge_inclusive: bool | None = None,
-    fill_kwargs: dict[str, Any] | None = None,
-) -> None:
-    """
-    Fills a histogram *h* with data from an awkward array, numpy array or nested dictionary *data*.
-    The data is assumed to be structured in the same way as the histogram axes. If
-    *last_edge_inclusive* is *True*, values that would land exactly on the upper-most bin edge of an
-    axis are shifted into the last bin. If it is *None*, the behavior is determined automatically
-    and depends on the variable axis type. In this case, shifting is applied to all continuous,
-    non-circular axes.
-    """
-    if fill_kwargs is None:
-        fill_kwargs = {}
-
-    # helper to decide whether the variable axis qualifies for shifting the last bin
-    def allows_shift(ax) -> bool:
-        return ax.traits.continuous and not ax.traits.circular
-
-    # determine the axis names, figure out which which axes the last bin correction should be done
-    axis_names = []
-    correct_last_bin_axes = []
-    for ax in h.axes:
-        axis_names.append(ax.name)
-        # include values hitting last edge?
-        if not len(ax.widths) or not isinstance(ax, hist.axis.Variable):
-            continue
-        if (last_edge_inclusive is None and allows_shift(ax)) or last_edge_inclusive:
-            correct_last_bin_axes.append(ax)
-
-    # check data
-    if not isinstance(data, dict):
-        if len(axis_names) != 1:
-            raise ValueError("got multi-dimensional hist but only one dimensional data")
-        data = {axis_names[0]: data}
-    else:
-        for name in axis_names:
-            if name not in data and name not in fill_kwargs:
-                raise ValueError(f"missing data for histogram axis '{name}'")
-
-    # correct last bin values
-    for ax in correct_last_bin_axes:
-        right_egde_mask = ak.flatten(data[ax.name], axis=None) == ax.edges[-1]
-        if np.any(right_egde_mask):
-            data[ax.name] = ak.copy(data[ax.name])
-            flat_np_view(data[ax.name])[right_egde_mask] -= ax.widths[-1] * 1e-5
-
-    # fill
-    arrays = ak.flatten(ak.cartesian(data))
-    h.fill(**fill_kwargs, **{field: arrays[field] for field in arrays.fields})
 
 
 class RouteFilter(object):
@@ -1334,7 +1287,7 @@ class ArrayFunction(Derivable):
     .. code-block:: python
 
         @my_other_func.init
-        def my_other_func_init(self):
+        def my_other_func_init(self: ArrayFunction):
             self.uses.add(my_func)
 
         # the above adds an initialization function to the already created class my_other_func,
@@ -1588,7 +1541,7 @@ class ArrayFunction(Derivable):
         cls.skip_func = func
 
     def __init__(
-        self,
+        self: ArrayFunction,
         call_func: Callable | None = law.no_value,
         init_func: Callable | None = law.no_value,
         skip_func: Callable | None = law.no_value,
@@ -1659,22 +1612,13 @@ class ArrayFunction(Derivable):
         if deferred_init:
             self.deferred_init(instance_cache=instance_cache)
 
-    def __getitem__(self, dep_cls: DerivableMeta) -> ArrayFunction:
+    def __getitem__(self: ArrayFunction, dep_cls: DerivableMeta) -> ArrayFunction:
         """
         Item access to dependencies.
         """
         return self.deps[dep_cls]
 
-    def has_dep(self, dep_cls: DerivableMeta) -> bool:
-        """
-        Returns whether a dependency of class *dep_cls* is present.
-
-        :param dep_cls: The class of the potential dependency.
-        :return bool: Whether the dependency is present.
-        """
-        return dep_cls in self.deps
-
-    def deferred_init(self, instance_cache: dict | None = None) -> dict:
+    def deferred_init(self: ArrayFunction, instance_cache: dict | None = None) -> dict:
         """
         Controls the deferred part of the initialization process.
         """
@@ -1692,7 +1636,7 @@ class ArrayFunction(Derivable):
         return instance_cache
 
     def create_dependencies(
-        self,
+        self: ArrayFunction,
         instance_cache: dict,
         only_update: bool = False,
     ) -> None:
@@ -1785,7 +1729,7 @@ class ArrayFunction(Derivable):
                     del self.deps[cls]
 
     def instantiate_dependency(
-        self,
+        self: ArrayFunction,
         cls: DerivableMeta,
         **kwargs: Any,
     ) -> ArrayFunction:
@@ -1801,7 +1745,7 @@ class ArrayFunction(Derivable):
 
         return cls(**kwargs)
 
-    def get_dependencies(self) -> set[ArrayFunction | Any]:
+    def get_dependencies(self: ArrayFunction) -> set[ArrayFunction | Any]:
         """
         Returns a set of instances of all dependencies.
         """
@@ -1818,7 +1762,7 @@ class ArrayFunction(Derivable):
         return deps
 
     def _get_columns(
-        self,
+        self: ArrayFunction,
         io_flag: IOFlag,
         dependencies: bool = True,
         _cache: set | None = None,
@@ -1855,30 +1799,26 @@ class ArrayFunction(Derivable):
 
                 # add the columns
                 columns |= flagged.wrapped._get_columns(flagged.io_flag, _cache=_cache)
-            elif isinstance(obj, str):
-                # expand braces in strings
-                columns |= set(map(Route, law.util.brace_expand(obj)))
             else:
-                # let Route handle it
                 columns.add(Route(obj))
 
         return columns
 
-    def _get_used_columns(self, _cache: set | None = None) -> set[Route]:
+    def _get_used_columns(self: ArrayFunction, _cache: set | None = None) -> set[Route]:
         return self._get_columns(io_flag=self.IOFlag.USES, _cache=_cache)
 
     @property
-    def used_columns(self) -> set[Route]:
+    def used_columns(self: ArrayFunction) -> set[Route]:
         return self._get_used_columns()
 
-    def _get_produced_columns(self, _cache: set | None = None) -> set[Route]:
+    def _get_produced_columns(self: ArrayFunction, _cache: set | None = None) -> set[Route]:
         return self._get_columns(io_flag=self.IOFlag.PRODUCES, _cache=_cache)
 
     @property
-    def produced_columns(self) -> set[Route]:
+    def produced_columns(self: ArrayFunction) -> set[Route]:
         return self._get_produced_columns()
 
-    def _check_columns(self, ak_array: ak.Array, io_flag: IOFlag) -> None:
+    def _check_columns(self: ArrayFunction, ak_array: ak.Array, io_flag: IOFlag) -> None:
         """
         Check if awkward array contains at least one column matching each
         entry in 'uses' or 'produces' and raise Exception if none were found.
@@ -1910,7 +1850,7 @@ class ArrayFunction(Derivable):
         missing = ", ".join(sorted(map(str, missing)))
         raise Exception(f"'{self.cls_name}' did not {action} any columns matching: {missing}")
 
-    def __call__(self, *args, **kwargs) -> Any:
+    def __call__(self: ArrayFunction, *args, **kwargs) -> Any:
         """
         Forwards the call to :py:attr:`call_func` with all *args* and *kwargs*. An exception is
         raised if :py:attr:`call_func` is not callable.
@@ -1958,22 +1898,20 @@ class ArrayFunction(Derivable):
 deferred_column = ArrayFunction.DeferredColumn.deferred_column
 
 
-def tagged_column(
-    tag: str | Sequence[str] | set[str],
+def optional_column(
     *routes: Route | Any | set[Route | Any],
 ) -> Route | set[Route]:
     """
     Takes one or several objects *routes* whose type can be anything that is accepted by the
     :py:class:`~.Route` constructor, and returns a single or a set of route objects being tagged
-    *tag*, which can be a single tag, a sequence, or a set of tags. Brace expansion is supported
-    in strings.
+    ``"optional"``.
     """
     if not routes:
         raise Exception("at least one route argument must be given")
 
-    def tagged_route(r):
+    def opt_route(r):
         route = Route(r)
-        route.add_tag(tag)
+        route.add_tag("optional")
         return route
 
     # determine if multple objects are given and handle the case where a single set is given
@@ -1984,39 +1922,8 @@ def tagged_column(
     elif len(routes) > 1:
         multiple = True
 
-    # create tagged routes
-    tagged_routes = set()
-    for r in routes:
-        # brace expansions for strings
-        if isinstance(r, str):
-            tagged_routes |= set(map(tagged_route, law.util.brace_expand(r)))
-        else:
-            tagged_routes.add(tagged_route(r))
-
-    multiple |= len(tagged_routes) > 1
-    return tagged_routes if multiple else tagged_routes.pop()
-
-
-def optional_column(
-    *routes: Route | Any | set[Route | Any],
-) -> Route | set[Route]:
-    """
-    Takes one or several objects *routes* whose type can be anything that is accepted by the
-    :py:class:`~.Route` constructor, and returns a single or a set of route objects being tagged
-    ``"optional"``.
-    """
-    return tagged_column("optional", *routes)
-
-
-def skip_column(
-    *routes: Route | Any | set[Route | Any],
-) -> Route | set[Route]:
-    """
-    Takes one or several objects *routes* whose type can be anything that is accepted by the
-    :py:class:`~.Route` constructor, and returns a single or a set of route objects being tagged
-    ``"skip"``.
-    """
-    return tagged_column("skip", *routes)
+    # create multiple or a single tagged route
+    return set(map(opt_route, routes)) if multiple else opt_route(list(routes)[0])
 
 
 class TaskArrayFunction(ArrayFunction):
@@ -2558,10 +2465,12 @@ class DaskArrayReader(object):
         PARTITIONS = enum.auto()
 
     def __init__(
-        self,
+        self: DaskArrayReader,
         path: str,
         open_options: dict | None = None,
-        materialization_strategy: MaterializationStrategy = MaterializationStrategy.SLICES,
+        # TODO: we want to go back to SLICES as soon as possible, but currently there is an issue
+        #       that we load all events into memory for each chunk when using SLICES
+        materialization_strategy: MaterializationStrategy = MaterializationStrategy.PARTITIONS,
     ):
         super().__init__()
 
@@ -2588,26 +2497,24 @@ class DaskArrayReader(object):
             self.chunk_to_partitions_lock = threading.Lock()
             self.partition_locks = {p: threading.Lock() for p in range(self.dak_array.npartitions)}
 
-    def __del__(self) -> None:
+    def __del__(self: DaskArrayReader) -> None:
         self.close()
 
-    def __len__(self) -> int:
-        if not self.dak_array.known_divisions:
-            self.dak_array.eager_compute_divisions()
+    def __len__(self: DaskArrayReader) -> int:
         return len(self.dak_array)
 
     @property
-    def closed(self) -> bool:
+    def closed(self: DaskArrayReader) -> bool:
         return self.dak_array is None
 
-    def close(self) -> None:
+    def close(self: DaskArrayReader) -> None:
         # free memory and perform an eager, overly cautious gc round
         self.dak_array = None
         if getattr(self, "partition_cache", None):
             self.partition_cache.clear()
         gc.collect()
 
-    def materialize(self, *args, **kwargs) -> ak.Array:
+    def materialize(self: DaskArrayReader, *args, **kwargs) -> ak.Array:
         """
         Materializes (reads from disk) a slice of the array using the configured
         :py:attr:`materialization_strategy`. All *args* and *kwargs* are forwarded to the internal
@@ -2626,7 +2533,7 @@ class DaskArrayReader(object):
         )
 
     def _materialize_via_slices(
-        self,
+        self: DaskArrayReader,
         *,
         chunk_index: int,
         entry_start: int,
@@ -2663,9 +2570,7 @@ class DaskArrayReader(object):
         # fill the chunk -> partitions mapping once
         with self.chunk_to_partitions_lock:
             if not self.chunk_to_partitions:
-                if not self.dak_array.known_divisions:
-                    self.dak_array.eager_compute_divisions()
-                divs = tuple(map(int, self.dak_array.divisions))
+                divs = self.dak_array.divisions
                 # note: a hare-and-tortoise algorithm could be possible to get the mapping with less
                 # than n^2 complexity, but for our case with ~30 chunks this should be ok (for now)
                 n_chunks = int(math.ceil(len(self) / max_chunk_size))
@@ -3056,13 +2961,13 @@ class ChunkedIOHandler(object):
         ),
         open_options: dict | None = None,
         read_columns: set[str | Route] | None = None,
-    ) -> tuple[tuple[uproot.ReadOnlyDirectory, str], int]:
+    ) -> tuple[uproot.ReadOnlyDirectory, int]:
         """
         Opens an uproot file at *source* for subsequent processing with coffea and returns a 2-tuple
-        *((uproot file, tree name), tree entries)*. *source* can be the path of the file, an already
-        opened, readable uproot file (assuming the tree is called "Events"), or a 2-tuple whose
-        second item defines the name of the tree to be loaded. *open_options* are forwarded to
-        ``uproot.open`` if a new file is opened. Passing *read_columns* has no effect.
+        *(uproot file, tree entries)*. *source* can be the path of the file, an already opened,
+        readable uproot file (assuming the tree is called "Events"), or a 2-tuple whose second item
+        defines the name of the tree to be loaded. *open_options* are forwarded to ``uproot.open``
+        if a new file is opened. Passing *read_columns* has no effect.
         """
         tree_name = "Events"
         if isinstance(source, tuple) and len(source) == 2:
@@ -3079,39 +2984,38 @@ class ChunkedIOHandler(object):
         else:
             raise Exception(f"'{source}' cannot be opened as coffea_root")
 
-        return ((source, tree_name), tree.num_entries)
+        return (source, tree.num_entries)
 
     @classmethod
     def close_coffea_root(
         cls,
-        source_object: tuple[str | uproot.ReadOnlyDirectory, str],
+        source_object: str | uproot.ReadOnlyDirectory,
     ) -> None:
         """
-        Closes a ROOT file referred to by the first item in a 2-tuple *source_object* if it is a
-        ``ReadOnlyDirectory``. In case a string is passed, this method does nothing.
+        Closes a ROOT file referred to by *source_object* if it is a ``ReadOnlyDirectory``. In case
+        a string is passed, this method does nothing.
         """
-        close = getattr(source_object[0], "close", None)
+        close = None if isinstance(source_object, str) else getattr(source_object, "close", None)
         if callable(close):
             close()
 
     @classmethod
     def read_coffea_root(
         cls,
-        source_object: tuple[str | uproot.ReadOnlyDirectory, str],
+        source_object: str | uproot.ReadOnlyDirectory,
         chunk_pos: ChunkPosition,
         read_options: dict | None = None,
         read_columns: set[str | Route] | None = None,
     ) -> coffea.nanoevents.methods.base.NanoEventsArray:
         """
-        Given a file location or opened uproot file, and a tree name in a 2-tuple *source_object*,
-        returns an awkward array chunk referred to by *chunk_pos*, assuming nanoAOD structure.
-        *read_options* are passed to ``coffea.nanoevents.NanoEventsFactory.from_root``.
-        *read_columns* are converted to strings and, if not already present, added as nested fields
-        ``iteritems_options.filter_name`` to *read_options*.
+        Given a file location or opened uproot file *source_object*, returns an awkward array chunk
+        referred to by *chunk_pos*, assuming nanoAOD structure. *read_options* are passed to
+        ``coffea.nanoevents.NanoEventsFactory.from_root``. *read_columns* are converted to strings
+        and, if not already present, added as nested field ``iteritems_options.filter_name`` to
+        *read_options*.
         """
         # default read options
         read_options = read_options or {}
-        read_options["delayed"] = False
         read_options["runtime_cache"] = None
         read_options["persistent_cache"] = None
 
@@ -3134,10 +3038,8 @@ class ChunkedIOHandler(object):
             read_options.setdefault("iteritems_options", {})["filter_name"] = filter_name
 
         # read the events chunk into memory
-        _source_object, tree_name = source_object
         chunk = coffea.nanoevents.NanoEventsFactory.from_root(
-            _source_object,
-            treepath=tree_name,
+            source_object,
             entry_start=chunk_pos.entry_start,
             entry_stop=chunk_pos.entry_stop,
             **read_options,

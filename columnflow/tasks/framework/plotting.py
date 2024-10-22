@@ -60,11 +60,11 @@ class PlotBase(ConfigTask):
         description="when True, no legend is drawn; default: None",
     )
     cms_label = luigi.Parameter(
-        default=law.NO_STR,
+        default="pw",
         significant=False,
         description="postfix to add behind the CMS logo; when 'skip', no CMS logo is shown at all; "
         "the following special values are expanded into the usual postfixes: wip, pre, pw, sim, "
-        "simwip, simpre, simpw, od, odwip, public; no default",
+        "simwip, simpre, simpw, od, odwip, public; default: 'pw'",
     )
 
     @classmethod
@@ -99,34 +99,24 @@ class PlotBase(ConfigTask):
         # convert parameters to usable values during plotting
         params = DotDict()
         dict_add_strict(params, "skip_legend", self.skip_legend)
-        dict_add_strict(params, "cms_label", None if self.cms_label == law.NO_STR else self.cms_label)
+        dict_add_strict(params, "cms_label", self.cms_label)
         dict_add_strict(params, "general_settings", self.general_settings)
         dict_add_strict(params, "custom_style_config", self.custom_style_config)
         return params
-
-    def plot_parts(self) -> law.util.InsertableDict:
-        """
-        Returns a sorted, insertable dictionary containing all parts that make up the name of a
-        plot file.
-        """
-        return law.util.InsertableDict()
 
     def get_plot_names(self, name: str) -> list[str]:
         """
         Returns a list of basenames for created plots given a file *name* for all configured file
         types, plus the additional plot suffix.
         """
-        # get plot parts
-        parts = self.plot_parts()
+        suffix = ""
+        if self.plot_suffix and self.plot_suffix != law.NO_STR:
+            suffix = f"__{self.plot_suffix}"
 
-        # add the plot_suffix if not already present
-        if "suffix" not in parts and self.plot_suffix not in ("", law.NO_STR, None):
-            parts["suffix"] = self.plot_suffix
-
-        # build the full name
-        full_name = "__".join(map(str, [name] + list(parts.values())))
-
-        return [f"{full_name}.{ft}" for ft in self.file_types]
+        return [
+            f"{name}{suffix}.{ft}"
+            for ft in self.file_types
+        ]
 
     def get_plot_func(self, func_name: str) -> Callable:
         """
@@ -187,8 +177,6 @@ class PlotBase(ConfigTask):
         if isinstance(custom_style_config, dict) and isinstance(style_config, dict):
             style_config = law.util.merge_dicts(custom_style_config, style_config)
             kwargs["style_config"] = style_config
-        # update defaults after application of `general_settings`
-        kwargs.setdefault("cms_label", "pw")
 
         return kwargs
 

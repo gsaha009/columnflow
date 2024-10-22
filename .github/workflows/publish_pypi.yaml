@@ -27,8 +27,8 @@ jobs:
         run: python setup.py sdist
 
       - name: Publish package 🐍
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@master
         with:
           user: __token__
           password: ${{ secrets.PYPI_TOKEN }}
-          skip-existing: true
+          skip_existing: true

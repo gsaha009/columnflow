@@ -2,16 +2,26 @@
 ========================
 
 .. currentmodule:: columnflow.selection
+
 .. automodule:: columnflow.selection
-    :autosummary:
-    :members:
-    :undoc-members:
+   :autosummary:
 
+``Selector``
+------------
+.. autoclass:: Selector
+   :members:
+   :special-members:
+
+``SelectionResult``
+-------------------
+.. autoclass:: SelectionResult
+   :members:
+   :special-members:
+
+``Submodules``
+--------------
 .. toctree::
-    :maxdepth: 1
+   :maxdepth: 2
 
-    empty
-    matching
-    stats
-    util
-    cms/index
+   matching
+   cms

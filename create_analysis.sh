@@ -19,9 +19,7 @@ create_analysis() {
     local exec_dir="$( pwd )"
     local fetch_cf_branch="master"
     local fetch_cmsdb_branch="master"
-    local verbose="${CF_CREATE_ANALYSIS_VERBOSE:-false}"
     local debug="${CF_CREATE_ANALYSIS_DEBUG:-false}"
-    ${debug} && verbose="true"
 
     # zsh options
     if ${shell_is_zsh}; then
@@ -35,11 +33,11 @@ create_analysis() {
     #
 
     str_lc() {
-        echo "$1" | tr '[:upper:]' '[:lower:]'
+        ${shell_is_zsh} && echo "${(L)1}" || echo "${1,,}"
     }
 
     str_uc() {
-        echo "$1" | tr '[:lower:]' '[:upper:]'
+        ${shell_is_zsh} && echo "${(U)1}" || echo "${1^^}"
     }
 
     export_var() {
@@ -173,16 +171,14 @@ create_analysis() {
     export cf_short_name_lc="$( str_lc "${cf_short_name}" )"
     export cf_short_name_uc="$( str_uc "${cf_short_name}" )"
 
-    # verbose output
-    if ${verbose}; then
-        echo
-        echo_color cyan "received input values"
+    # debug output
+    if ${debug}; then
         echo "analysis name  : ${cf_analysis_name}"
         echo "module name    : ${cf_module_name}"
         echo "short name lc  : ${cf_short_name_lc}"
         echo "short name uc  : ${cf_short_name_uc}"
         echo "analysis flavor: ${cf_analysis_flavor}"
-        echo "ssh submodules : ${cf_use_ssh}"
+        echo "use ssh        : ${cf_use_ssh}"
         echo
     fi
 

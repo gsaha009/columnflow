@@ -2,16 +2,18 @@
 =========================
 
 .. currentmodule:: columnflow.production
+
 .. automodule:: columnflow.production
-    :autosummary:
-    :members:
-    :undoc-members:
+   :autosummary:
+   
+Classes
++++++++
 
-.. toctree::
-    :maxdepth: 1
+.. autoclass:: Producer
+   :members:
+   :undoc-members:
 
-    categories
-    normalization
-    processes
-    util
-    cms/index
+.. toctree:: 
+   :maxdepth: 1
+   
+   util

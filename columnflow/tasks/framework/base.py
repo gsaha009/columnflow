@@ -12,16 +12,14 @@ import importlib
 import itertools
 import inspect
 import functools
-import collections
-import copy
 
 import luigi
 import law
 import order as od
 
+from columnflow.types import Sequence, Callable, Any
 from columnflow.columnar_util import mandatory_coffea_columns, Route, ColumnCollection
-from columnflow.util import is_regex, DotDict
-from columnflow.types import Sequence, Callable, Any, T
+from columnflow.util import DotDict
 
 
 # default analysis and config related objects
@@ -89,14 +87,6 @@ class AnalysisTask(BaseTask, law.SandboxTask):
     default_wlcg_fs = law.config.get_expanded("target", "default_wlcg_fs", "wlcg_fs")
     default_output_location = "config"
 
-    exclude_params_index = {"user"}
-    exclude_params_req = {"user"}
-    exclude_params_repr = {"user"}
-
-    # cached and parsed sections of the law config for faster lookup
-    _cfg_outputs_dict = None
-    _cfg_versions_dict = None
-
     @classmethod
     def modify_param_values(cls, params: dict) -> dict:
         params = super().modify_param_values(params)
@@ -148,191 +138,50 @@ class AnalysisTask(BaseTask, law.SandboxTask):
         # build the params
         params = super().req_params(inst, **kwargs)
 
-        # use a default version when not explicitly set in kwargs
+        # overwrite the version when set in the config
         if isinstance(getattr(cls, "version", None), luigi.Parameter) and "version" not in kwargs:
-            default_version = cls.get_default_version(inst, params)
-            if default_version and default_version != law.NO_STR:
-                params["version"] = default_version
+            config_version = cls.get_version_map_value(inst, params)
+            if config_version:
+                params["version"] = config_version
 
         return params
 
     @classmethod
-    def _structure_cfg_items(cls, items: list[tuple[str, Any]]) -> dict:
-        if not items:
-            return {}
-
-        # breakup keys at double underscores and create a nested dictionary
-        items_dict = {}
-        for key, value in items:
-            if not value:
-                continue
-            d = items_dict
-            parts = key.split("__")
-            for i, part in enumerate(parts):
-                if i < len(parts) - 1:
-                    # fill intermediate structure
-                    if part not in d:
-                        d[part] = {}
-                    elif not isinstance(d[part], dict):
-                        d[part] = {"*": d[part]}
-                    d = d[part]
-                else:
-                    # assign value to the last nesting level
-                    if part in d and isinstance(d[part], dict):
-                        d[part]["*"] = value
-                    else:
-                        d[part] = value
-
-        return items_dict
+    def get_version_map(cls, task: AnalysisTask) -> dict[str, str | Callable]:
+        return task.analysis_inst.get_aux("versions", {})
 
     @classmethod
-    def _get_cfg_outputs_dict(cls):
-        if cls._cfg_outputs_dict is None and law.config.has_section("outputs"):
-            # collect config item pairs
-            skip_keys = {"wlcg_file_systems", "lfn_sources"}
-            items = [
-                (key, law.config.get_expanded("outputs", key, None, split_csv=True))
-                for key, value in law.config.items("outputs")
-                if value and key not in skip_keys
-            ]
-            cls._cfg_outputs_dict = cls._structure_cfg_items(items)
-
-        return cls._cfg_outputs_dict
-
-    @classmethod
-    def _get_cfg_versions_dict(cls):
-        if cls._cfg_versions_dict is None and law.config.has_section("versions"):
-            # collect config item pairs
-            items = [
-                (key, value)
-                for key, value in law.config.items("versions")
-                if value
-            ]
-            cls._cfg_versions_dict = cls._structure_cfg_items(items)
-
-        return cls._cfg_versions_dict
-
-    @classmethod
-    def get_default_version(cls, inst: AnalysisTask, params: dict[str, Any]) -> str | None:
-        """
-        Determines the default version for instances of *this* task class when created through
-        :py:meth:`req` from another task *inst* given parameters *params*.
-
-        :param inst: The task instance from which *this* task should be created via :py:meth:`req`.
-        :param params: The parameters that are passed to the task instance.
-        :return: The default version, or *None* if no default version can be defined.
-        """
-        # get different attributes by which the default version might be looked up
-        keys = cls.get_config_lookup_keys(params)
-
-        # forward to lookup implementation
-        version = cls._get_default_version(inst, params, keys)
-
-        # after a version is found, it can still be an exectuable taking the same arguments
-        return version(cls, inst, params) if callable(version) else version
-
-    @classmethod
-    def _get_default_version(
+    def get_version_map_value(
         cls,
         inst: AnalysisTask,
-        params: dict[str, Any],
-        keys: law.util.InsertableDict,
+        params: dict,
+        version_map: dict[str, str | Callable] | None = None,
     ) -> str | None:
-        # try to lookup the version in the analysis's auxiliary data
-        analysis_inst = params.get("analysis_inst") or getattr(inst, "analysis_inst", None)
-        if analysis_inst:
-            version = cls._dfs_key_lookup(keys, analysis_inst.x("versions", {}))
-            if version:
-                return version
+        if version_map is None:
+            version_map = cls.get_version_map(inst)
 
-        # try to find it in the analysis section in the law config
-        if law.config.has_section("versions"):
-            versions_dict = cls._get_cfg_versions_dict()
-            if versions_dict:
-                version = cls._dfs_key_lookup(keys, versions_dict)
-                if version:
-                    return version
+        # the task family must be in the version map
+        version = version_map.get(cls.task_family)
+        if not version:
+            return None
 
-        # no default version found
-        return None
+        # when version is a callable, invoke it
+        if callable(version):
+            version = version(cls, inst, params)
 
-    @classmethod
-    def get_config_lookup_keys(
-        cls,
-        inst_or_params: AnalysisTask | dict[str, Any],
-    ) -> law.util.InsertiableDict:
-        """
-        Returns a dictionary with keys that can be used to lookup state specific values in a config
-        or dictionary, such as default task versions or output locations.
+        # at this point, version must be a string
+        if not isinstance(version, str):
+            raise TypeError(
+                f"version map entry for '{cls.task_family}' must be a string, but got {version}",
+            )
 
-        :param inst_or_params: The tasks instance or its parameters.
-        :return: A dictionary with keys that can be used for nested lookup.
-        """
-        keys = law.util.InsertableDict()
-
-        get = (
-            inst_or_params.get
-            if isinstance(inst_or_params, dict)
-            else lambda attr: (getattr(inst_or_params, attr, None))
-        )
-
-        # add the analysis name
-        analysis = get("analysis")
-        if analysis not in {law.NO_STR, None, ""}:
-            keys["analysis"] = analysis
-
-        # add the task family
-        keys["task_family"] = cls.task_family
-
-        return keys
-
-    @classmethod
-    def _dfs_key_lookup(
-        cls,
-        keys: law.util.InsertableDict[str, str] | Sequence[str],
-        nested_dict: dict[str, Any],
-        empty_value: Any = None,
-    ) -> str | Callable | None:
-        # opinionated nested dictionary lookup alongside in ordered sequence of (optional) keys,
-        # that allows for patterns in the keys and, interpreting the nested dict as a tree, finds
-        # matches in a depth-first (dfs) manner
-        if not nested_dict:
-            return empty_value
-
-        # the keys to use for the lookup are the values of the keys dict
-        keys = collections.deque(keys.values() if isinstance(keys, dict) else keys)
-
-        # start tree traversal using a queue lookup consisting of names and values of tree nodes,
-        # as well as the remaining keys (as a deferred function) to compare for that particular path
-        lookup = collections.deque([tpl + ((lambda: keys.copy()),) for tpl in nested_dict.items()])
-        while lookup:
-            pattern, obj, keys_func = lookup.popleft()
-
-            # create the copy of comparison keys on demand
-            # (the original sequence is living once on the previous stack until now)
-            _keys = keys_func()
-
-            # check if the pattern matches any key
-            regex = is_regex(pattern)
-            while _keys:
-                key = _keys.popleft()
-                if law.util.multi_match(key, pattern, regex=regex):
-                    # when obj is not a dict, we found the value
-                    if not isinstance(obj, dict):
-                        return obj
-                    # go one level deeper and stop the current iteration
-                    keys_func = (lambda _keys: (lambda: _keys.copy()))(_keys)
-                    lookup.extendleft(tpl + (keys_func,) for tpl in reversed(obj.items()))
-                    break
-
-        # at this point, no value could be found
-        return empty_value
+        return version
 
     @classmethod
     def get_known_shifts(cls, config_inst: od.Config, params: dict) -> tuple[set[str], set[str]]:
         """
-        Returns two sets of shifts in a tuple: shifts implemented by _this_ task, and dependent
-        shifts that are implemented by upstream tasks.
+        Returns two sets of shifts in a tuple: shifts implemented by _this_ task, and depdenent
+        shifts implemented by upstream tasks.
         """
         # get shifts from upstream dependencies, consider both their own and upstream shifts as one
         upstream_shifts = set()
@@ -371,11 +220,6 @@ class AnalysisTask(BaseTask, law.SandboxTask):
 
     @classmethod
     def get_producer_kwargs(cls, *args, **kwargs) -> dict[str, Any]:
-        # implemented here only for simplified mro control
-        return cls.get_array_function_kwargs(*args, **kwargs)
-
-    @classmethod
-    def get_weight_producer_kwargs(cls, *args, **kwargs) -> dict[str, Any]:
         # implemented here only for simplified mro control
         return cls.get_array_function_kwargs(*args, **kwargs)
 
@@ -440,7 +284,7 @@ class AnalysisTask(BaseTask, law.SandboxTask):
                 lookup.extend(list(object_groups[name]))
             elif accept_patterns:
                 # must eventually be a pattern, perform an object traversal
-                for _name in sorted(get_all_object_names()):
+                for _name in get_all_object_names():
                     if law.util.multi_match(_name, name):
                         object_names.append(_name)
 
@@ -503,6 +347,7 @@ class AnalysisTask(BaseTask, law.SandboxTask):
         Example where the default points to a function:
 
         .. code-block:: python
+
 
             def resolve_param_values(params):
                 params["ml_model"] = AnalysisTask.resolve_config_default(
@@ -671,26 +516,8 @@ class AnalysisTask(BaseTask, law.SandboxTask):
         # store the analysis instance
         self.analysis_inst = self.get_analysis_inst(self.analysis)
 
-        # cached values added and accessed by cached_value()
-        self._cached_values = {}
-
-    def cached_value(self, key: str, func: Callable[[], T]) -> T:
-        """
-        Upon first invocation, the function *func* is called and its return value is stored under
-        *key* in :py:attr:`_cached_values`. Subsequent calls with the same *key* return the cached
-        value.
-
-        :param key: The key under which the value is stored.
-        :param func: The function that is called to generate the value.
-        :return: The cached value.
-        """
-        if key not in self._cached_values:
-            self._cached_values[key] = func()
-        return self._cached_values[key]
-
     def store_parts(self) -> law.util.InsertableDict:
-        """
-        Returns a :py:class:`law.util.InsertableDict` whose values are used to create a store path.
+        """Returns a :py:class:`law.util.InsertableDict` whose values are used to create a store path.
         For instance, the parts ``{"keyA": "a", "keyB": "b", 2: "c"}`` lead to the path "a/b/c". The
         keys can be used by subclassing tasks to overwrite values.
 
@@ -710,23 +537,8 @@ class AnalysisTask(BaseTask, law.SandboxTask):
 
         return parts
 
-    def _get_store_parts_modifier(
-        self,
-        modifier: str | Callable[[AnalysisTask, dict], dict],
-    ) -> Callable[[AnalysisTask, dict], dict] | None:
-        if isinstance(modifier, str):
-            # interpret it as a name of an entry in the store_parts_modifiers aux entry
-            modifier = self.analysis_inst.x("store_parts_modifiers", {}).get(modifier)
-
-        return modifier if callable(modifier) else None
-
-    def local_path(
-        self,
-        *path,
-        store_parts_modifier: str | Callable[[AnalysisTask, dict], dict] | None = None,
-        **kwargs,
-    ) -> str:
-        """ local_path(*path, store=None, fs=None, store_parts_modifier=None)
+    def local_path(self, *path, **kwargs):
+        """ local_path(*path, store=None, fs=None)
         Joins path fragments from *store* (defaulting to :py:attr:`default_store`),
         :py:meth:`store_parts` and *path* and returns the joined path. In case a *fs* is defined,
         it should refer to the config section of a local file system, and consequently, *store* is
@@ -739,25 +551,14 @@ class AnalysisTask(BaseTask, law.SandboxTask):
             store = kwargs.get("store") or self.default_store
             parts += (store,)
 
-        # get and optional modify the store parts
-        store_parts = self.store_parts()
-        store_parts_modifier = self._get_store_parts_modifier(store_parts_modifier)
-        if callable(store_parts_modifier):
-            store_parts = store_parts_modifier(self, store_parts)
-
         # concatenate all parts that make up the path and join them
-        parts += tuple(store_parts.values()) + path
+        parts += tuple(self.store_parts().values()) + path
         path = os.path.join(*map(str, parts))
 
         return path
 
-    def local_target(
-        self,
-        *path,
-        store_parts_modifier: str | Callable[[AnalysisTask, dict], dict] | None = None,
-        **kwargs,
-    ):
-        """ local_target(*path, dir=False, store=None, fs=None, store_parts_modifier=None, **kwargs)
+    def local_target(self, *path, **kwargs):
+        """ local_target(*path, dir=False, store=None, fs=None, **kwargs)
         Creates either a local file or directory target, depending on *dir*, forwarding all *path*
         fragments, *store* and *fs* to :py:meth:`local_path` and all *kwargs* the respective target
         class.
@@ -770,41 +571,26 @@ class AnalysisTask(BaseTask, law.SandboxTask):
         cls = law.LocalDirectoryTarget if _dir else law.LocalFileTarget
 
         # create the local path
-        path = self.local_path(*path, store=store, fs=fs, store_parts_modifier=store_parts_modifier)
+        path = self.local_path(*path, store=store, fs=fs)
 
         # create the target instance and return it
         return cls(path, **kwargs)
 
-    def wlcg_path(
-        self,
-        *path,
-        store_parts_modifier: str | Callable[[AnalysisTask, dict], dict] | None = None,
-    ) -> str:
+    def wlcg_path(self, *path):
         """
         Joins path fragments from *store_parts()* and *path* and returns the joined path.
 
         The full URI to the target is not considered as it is usually defined in ``[wlcg_fs]``
         sections in the law config and hence subject to :py:func:`wlcg_target`.
         """
-        # get and optional modify the store parts
-        store_parts = self.store_parts()
-        store_parts_modifier = self._get_store_parts_modifier(store_parts_modifier)
-        if callable(store_parts_modifier):
-            store_parts = store_parts_modifier(self, store_parts)
-
         # concatenate all parts that make up the path and join them
-        parts = tuple(store_parts.values()) + path
+        parts = tuple(self.store_parts().values()) + path
         path = os.path.join(*map(str, parts))
 
         return path
 
-    def wlcg_target(
-        self,
-        *path,
-        store_parts_modifier: str | Callable[[AnalysisTask, dict], dict] | None = None,
-        **kwargs,
-    ):
-        """ wlcg_target(*path, dir=False, fs=default_wlcg_fs, store_parts_modifier=None, **kwargs)
+    def wlcg_target(self, *path, **kwargs):
+        """ wlcg_target(*path, dir=False, fs=default_wlcg_fs, **kwargs)
         Creates either a remote WLCG file or directory target, depending on *dir*, forwarding all
         *path* fragments to :py:meth:`wlcg_path` and all *kwargs* the respective target class. When
         *None*, *fs* defaults to the *default_wlcg_fs* class level attribute.
@@ -817,7 +603,7 @@ class AnalysisTask(BaseTask, law.SandboxTask):
         cls = law.wlcg.WLCGDirectoryTarget if _dir else law.wlcg.WLCGFileTarget
 
         # create the local path
-        path = self.wlcg_path(*path, store_parts_modifier=store_parts_modifier)
+        path = self.wlcg_path(*path)
 
         # create the target instance and return it
         return cls(path, **kwargs)
@@ -832,9 +618,7 @@ class AnalysisTask(BaseTask, law.SandboxTask):
         if isinstance(location, str):
             location = OutputLocation[location]
         if location == OutputLocation.config:
-            lookup_keys = self.get_config_lookup_keys(self)
-            outputs_dict = self._get_cfg_outputs_dict()
-            location = copy.deepcopy(self._dfs_key_lookup(lookup_keys, outputs_dict))
+            location = law.config.get_expanded("outputs", self.task_family, None, split_csv=True)
             if not location:
                 self.logger.debug(
                     f"no option 'outputs::{self.task_family}' found in law.cfg to obtain target "
@@ -847,17 +631,15 @@ class AnalysisTask(BaseTask, law.SandboxTask):
         # forward to correct function
         if location[0] == OutputLocation.local:
             # get other options
-            loc, store_parts_modifier = (location[1:] + [None, None])[:2]
+            (loc,) = (location[1:] + [None])[:1]
             loc_key = "fs" if (loc and law.config.has_section(loc)) else "store"
             kwargs.setdefault(loc_key, loc)
-            kwargs.setdefault("store_parts_modifier", store_parts_modifier)
             return self.local_target(*path, **kwargs)
 
         if location[0] == OutputLocation.wlcg:
             # get other options
-            fs, store_parts_modifier = (location[1:] + [None, None])[:2]
+            (fs,) = (location[1:] + [None])[:1]
             kwargs.setdefault("fs", fs)
-            kwargs.setdefault("store_parts_modifier", store_parts_modifier)
             return self.wlcg_target(*path, **kwargs)
 
         raise Exception(f"cannot determine output location based on '{location}'")
@@ -904,40 +686,11 @@ class ConfigTask(AnalysisTask):
         return params
 
     @classmethod
-    def _get_default_version(
-        cls,
-        inst: AnalysisTask,
-        params: dict[str, Any],
-        keys: law.util.InsertableDict,
-    ) -> str | None:
-        # try to lookup the version in the config's auxiliary data
-        config_inst = params.get("config_inst") or getattr(inst, "config_inst", None)
-        if config_inst:
-            version = cls._dfs_key_lookup(keys, config_inst.x("versions", {}))
-            if version:
-                return version
+    def get_version_map(cls, task):
+        if isinstance(task, ConfigTask):
+            return task.config_inst.get_aux("versions", {})
 
-        return super()._get_default_version(inst, params, keys)
-
-    @classmethod
-    def get_config_lookup_keys(
-        cls,
-        inst_or_params: ConfigTask | dict[str, Any],
-    ) -> law.util.InsertiableDict:
-        keys = super().get_config_lookup_keys(inst_or_params)
-
-        get = (
-            inst_or_params.get
-            if isinstance(inst_or_params, dict)
-            else lambda attr: (getattr(inst_or_params, attr, None))
-        )
-
-        # add the config name in front of the task family
-        config = get("config")
-        if config not in {law.NO_STR, None, ""}:
-            keys.insert_before("task_family", "config", config)
-
-        return keys
+        return super().get_version_map(task)
 
     @classmethod
     def get_array_function_kwargs(cls, task=None, **params):
@@ -980,31 +733,6 @@ class ConfigTask(AnalysisTask):
             columns |= set(Route(c) for c in mandatory_coffea_columns)
 
         return columns
-
-    def _expand_keep_column(
-        self: ConfigTask,
-        column:
-            ColumnCollection | Route | str |
-            Sequence[str | int | slice | type(Ellipsis) | list | tuple],
-    ) -> set[Route]:
-        """
-        Expands a *column* into a set of :py:class:`Route` objects. *column* can be a
-        :py:class:`ColumnCollection`, a string, or any type that is accepted by :py:class:`Route`.
-        Collections are expanded through :py:meth:`find_keep_columns`.
-
-        :param column: The column to expand.
-        :return: A set of :py:class:`Route` objects.
-        """
-        # expand collections
-        if isinstance(column, ColumnCollection):
-            return self.find_keep_columns(column)
-
-        # brace expand strings
-        if isinstance(column, str):
-            return set(map(Route, law.util.brace_expand(column)))
-
-        # let Route handle it
-        return {Route(column)}
 
 
 class ShiftTask(ConfigTask):
@@ -1103,26 +831,6 @@ class ShiftTask(ConfigTask):
 
         return kwargs
 
-    @classmethod
-    def get_config_lookup_keys(
-        cls,
-        inst_or_params: ShiftTask | dict[str, Any],
-    ) -> law.util.InsertiableDict:
-        keys = super().get_config_lookup_keys(inst_or_params)
-
-        get = (
-            inst_or_params.get
-            if isinstance(inst_or_params, dict)
-            else lambda attr: (getattr(inst_or_params, attr, None))
-        )
-
-        # add the (global) shift name
-        shift = get("shift")
-        if shift not in {law.NO_STR, None, ""}:
-            keys["shift"] = shift
-
-        return keys
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -1180,26 +888,6 @@ class DatasetTask(ShiftTask):
         return shifts, upstream_shifts
 
     @classmethod
-    def get_config_lookup_keys(
-        cls,
-        inst_or_params: DatasetTask | dict[str, Any],
-    ) -> law.util.InsertiableDict:
-        keys = super().get_config_lookup_keys(inst_or_params)
-
-        get = (
-            inst_or_params.get
-            if isinstance(inst_or_params, dict)
-            else lambda attr: (getattr(inst_or_params, attr, None))
-        )
-
-        # add the dataset name before the shift name
-        dataset = get("dataset")
-        if dataset not in {law.NO_STR, None, ""}:
-            keys.insert_before("shift", "dataset", dataset)
-
-        return keys
-
-    @classmethod
     def get_array_function_kwargs(cls, task=None, **params):
         kwargs = super().get_array_function_kwargs(task=task, **params)
 
@@ -1221,8 +909,8 @@ class DatasetTask(ShiftTask):
         # store dataset info for the global shift
         key = (
             self.global_shift_inst.name
-            if self.global_shift_inst and self.global_shift_inst.name in self.dataset_inst.info
-            else "nominal"
+            if self.global_shift_inst and self.global_shift_inst.name in self.dataset_inst.info else
+            "nominal"
         )
         self.dataset_info_inst = self.dataset_inst.get_info(key)
 
@@ -1235,22 +923,17 @@ class DatasetTask(ShiftTask):
         return parts
 
     @property
-    def file_merging_factor(self) -> int:
+    def file_merging_factor(self):
         """
-        Returns the number of files that are handled in one branch. When the :py:attr:`file_merging`
-        attribute is set to a positive integer, this value is returned. Otherwise, if the value is
-        zero, the original number of files is used instead.
-
-        Consecutive merging steps are not handled yet.
+        Returns the number of files that are handled in one branch. Consecutive merging steps are
+        not handled yet.
         """
         n_files = self.dataset_info_inst.n_files
 
         if isinstance(self.file_merging, int):
             # interpret the file_merging attribute as the merging factor itself
-            # zero means "merge all in one"
-            if self.file_merging < 0:
-                raise ValueError(f"invalid file_merging value {self.file_merging}")
-            n_merge = n_files if self.file_merging == 0 else self.file_merging
+            # non-positive numbers mean "merge all in one"
+            n_merge = self.file_merging if self.file_merging > 0 else n_files
         else:
             # no merging at all
             n_merge = 1

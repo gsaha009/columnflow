@@ -4,15 +4,18 @@
 Configuration of the __cf_analysis_name__ analysis.
 """
 
+import functools
+
 import law
 import order as od
 from scinum import Number
 
-from columnflow.config_util import (
-    get_root_processes_from_campaign, add_shift_aliases, add_category, verify_config_processes,
-)
-from columnflow.columnar_util import EMPTY_FLOAT, ColumnCollection, skip_column
 from columnflow.util import DotDict, maybe_import
+from columnflow.columnar_util import EMPTY_FLOAT, ColumnCollection
+from columnflow.config_util import (
+    get_root_processes_from_campaign, add_shift_aliases, get_shifts_from_sources, add_category,
+    verify_config_processes,
+)
 
 ak = maybe_import("awkward")
 
@@ -46,9 +49,6 @@ ana.x.cmssw_sandboxes = [
 # config groups for conveniently looping over certain configs
 # (used in wrapper_factory)
 ana.x.config_groups = {}
-
-# named function hooks that can modify store_parts of task outputs if needed
-ana.x.store_parts_modifiers = {}
 
 
 #
@@ -112,7 +112,6 @@ verify_config_processes(cfg, warn=True)
 cfg.x.default_calibrator = "example"
 cfg.x.default_selector = "example"
 cfg.x.default_producer = "example"
-cfg.x.default_weight_producer = "example"
 cfg.x.default_ml_model = None
 cfg.x.default_inference_model = "example"
 cfg.x.default_categories = ("incl",)
@@ -138,39 +137,11 @@ cfg.x.variable_groups = {}
 # (used during plotting)
 cfg.x.shift_groups = {}
 
-# general_settings groups for conveniently looping over different values for the general-settings parameter
-# (used during plotting)
-cfg.x.general_settings_groups = {}
-
-# process_settings groups for conveniently looping over different values for the process-settings parameter
-# (used during plotting)
-cfg.x.process_settings_groups = {}
-
-# variable_settings groups for conveniently looping over different values for the variable-settings parameter
-# (used during plotting)
-cfg.x.variable_settings_groups = {}
-
-# custom_style_config groups for conveniently looping over certain style configs
-# (used during plotting)
-cfg.x.custom_style_config_groups = {}
-
 # selector step groups for conveniently looping over certain steps
 # (used in cutflow tasks)
 cfg.x.selector_step_groups = {
     "default": ["muon", "jet"],
 }
-
-# calibrator groups for conveniently looping over certain calibrators
-# (used during calibration)
-cfg.x.calibrator_groups = {}
-
-# producer groups for conveniently looping over certain producers
-# (used during the ProduceColumns task)
-cfg.x.producer_groups = {}
-
-# ml_model groups for conveniently looping over certain ml_models
-# (used during the machine learning tasks)
-cfg.x.ml_model_groups = {}
 
 # custom method and sandbox for determining dataset lfns
 cfg.x.get_dataset_lfns = None
@@ -240,16 +211,14 @@ cfg.x.reduced_file_size = 512.0
 cfg.x.keep_columns = DotDict.wrap({
     "cf.ReduceEvents": {
         # general event info, mandatory for reading files with coffea
-        # additional columns can be added as strings, similar to object info
         ColumnCollection.MANDATORY_COFFEA,
         # object info
-        "Jet.{pt,eta,phi,mass,btagDeepFlavB,hadronFlavour}",
-        "Muon.{pt,eta,phi,mass,pfRelIso04_all}",
-        "MET.{pt,phi,significance,covXX,covXY,covYY}",
+        "Jet.pt", "Jet.eta", "Jet.phi", "Jet.mass", "Jet.btagDeepFlavB", "Jet.hadronFlavour",
+        "Muon.pt", "Muon.eta", "Muon.phi", "Muon.mass", "Muon.pfRelIso04_all",
+        "MET.pt", "MET.phi", "MET.significance", "MET.covXX", "MET.covXY", "MET.covYY",
         "PV.npvs",
-        # all columns added during selection using a ColumnCollection flag, but skip cutflow ones
+        # all columns added during selection using a ColumnCollection flag
         ColumnCollection.ALL_FROM_SELECTOR,
-        skip_column("cutflow.*"),
     },
     "cf.MergeSelectionMasks": {
         "cutflow.*",
@@ -259,19 +228,27 @@ cfg.x.keep_columns = DotDict.wrap({
     },
 })
 
-# pinned versions
-# (see [versions] in law.cfg for more info)
-cfg.x.versions = {}
+# event weight columns as keys in an OrderedDict, mapped to shift instances they depend on
+get_shifts = functools.partial(get_shifts_from_sources, cfg)
+cfg.x.event_weights = DotDict({
+    "normalization_weight": [],
+    "muon_weight": get_shifts("mu"),
+})
+
+# versions per task family, either referring to strings or to callables receving the invoking
+# task instance and parameters to be passed to the task family
+cfg.x.versions = {
+    # "cf.CalibrateEvents": "prod1",
+    # "cf.SelectEvents": (lambda cls, inst, params: "prod1" if params.get("selector") == "default" else "dev1"),
+    # ...
+}
 
 # channels
 # (just one for now)
 cfg.add_channel(name="mutau", id=1)
 
-# histogramming hooks, invoked before creating plots when --hist-hook parameter set
-cfg.x.hist_hooks = {}
-
 # add categories using the "add_category" tool which adds auto-generated ids
-# the "selection" entries refer to names of categorizers, e.g. in categorization/example.py
+# the "selection" entries refer to names of selectors, e.g. in selection/example.py
 # note: it is recommended to always add an inclusive category with id=1 or name="incl" which is used
 #       in various places, e.g. for the inclusive cutflow plots and the "empty" selector
 add_category(
@@ -319,7 +296,6 @@ cfg.add_variable(
     x_title="Number of jets",
     discrete_x=True,
 )
-# pt of all jets in every event
 cfg.add_variable(
     name="jets_pt",
     expression="Jet.pt",
@@ -327,16 +303,14 @@ cfg.add_variable(
     unit="GeV",
     x_title=r"$p_{T} of all jets$",
 )
-# pt of the first jet in every event
 cfg.add_variable(
-    name="jet1_pt",  # variable name, to be given to the "--variables" argument for the plotting task
-    expression="Jet.pt[:,0]",  # content of the variable
-    null_value=EMPTY_FLOAT,  # value to be given if content not available for event
-    binning=(40, 0.0, 400.0),  # (bins, lower edge, upper edge)
-    unit="GeV",  # unit of the variable, if any
-    x_title=r"Jet 1 $p_{T}$",  # x title of histogram when plotted
+    name="jet1_pt",
+    expression="Jet.pt[:,0]",
+    null_value=EMPTY_FLOAT,
+    binning=(40, 0.0, 400.0),
+    unit="GeV",
+    x_title=r"Jet 1 $p_{T}$",
 )
-# eta of the first jet in every event
 cfg.add_variable(
     name="jet1_eta",
     expression="Jet.eta[:,0]",

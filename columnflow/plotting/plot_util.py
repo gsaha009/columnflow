@@ -6,21 +6,21 @@ Some utils for plot functions.
 
 from __future__ import annotations
 
+from columnflow.types import Iterable, Any
+
 import operator
 import functools
 from collections import OrderedDict
 
 import order as od
 
-from columnflow.util import maybe_import, try_int, try_complex
-from columnflow.types import Iterable, Any, Callable
+from columnflow.util import maybe_import, try_int
 
 math = maybe_import("math")
 hist = maybe_import("hist")
 np = maybe_import("numpy")
 plt = maybe_import("matplotlib.pyplot")
 mplhep = maybe_import("mplhep")
-
 
 label_options = {
     "wip": "Work in progress",
@@ -55,93 +55,66 @@ def get_cms_label(ax: plt.Axes, llabel: str) -> dict:
     return cms_label_kwargs
 
 
-def apply_settings(
-    instances: Iterable[od.AuxDataMixin],
-    settings: dict[str, Any] | None,
-    parent_check: Callable[[od.AuxDataMixin, str], bool] | None = None,
-) -> None:
+def apply_settings(containers: Iterable[od.AuxDataMixin], settings: dict[dict, Any] | None):
     """
     applies settings from `settings` dictionary to a list of order objects `containers`
 
-    :param instances: List of order instances to apply settings to.
-    :param settings: Dictionary of settings to apply on the instances. Each key should correspond
-        to the name of an instance and each value should be a dictionary with attributes that will
-        be set on the instance either as a attribute or as an auxiliary.
-    :param parent_check: Function that checks if an instance has a parent with a given name.
+    :param containers: list of order objects
+    :param settings: dictionary of settings to apply on the *containers*. Each key should correspond
+        to the name of a container and each value should be a dictionary. The inner dictionary contains
+        keys and values that will be applied on the corresponding container either as an attribute
+        or alternatively as an auxiliary.
     """
     if not settings:
         return
 
-    for inst in instances:
-        for name, inst_settings in (settings or {}).items():
-            if inst != name and not (callable(parent_check) and parent_check(inst, name)):
-                continue
-            for key, value in inst_settings.items():
-                # try attribute first, otherwise auxiliary entry
-                try:
-                    setattr(inst, key, value)
-                except (AttributeError, ValueError):
-                    inst.set_aux(key, value)
+    for inst in containers:
+        inst_settings = settings.get(inst.name, {})
+        for setting_key, setting_value in inst_settings.items():
+            try:
+                setattr(inst, setting_key, setting_value)
+            except AttributeError:
+                inst.set_aux(setting_key, setting_value)
 
 
 def apply_process_settings(
-    hists: dict,
-    process_settings: dict | None = None,
+        hists: dict,
+        process_settings: dict | None = None,
 ) -> dict:
     """
     applies settings from `process_settings` dictionary to the `process_insts`;
     the `scale` setting is directly applied to the histograms
     """
     # apply all settings on process insts
-    apply_settings(
-        hists.keys(),
-        process_settings,
-        parent_check=(lambda proc, parent_name: proc.has_parent_process(parent_name)),
-    )
-
-    # helper to compute the stack integral
-    stack_integral = None
-
-    def get_stack_integral() -> float:
-        nonlocal stack_integral
-        if stack_integral is None:
-            stack_integral = sum(
-                proc_h.sum().value
-                for proc, proc_h in hists.items()
-                if not hasattr(proc, "unstack") and not proc.is_data
-            )
-        return stack_integral
+    process_insts = hists.keys()
+    apply_settings(process_insts, process_settings)
 
     # apply "scale" setting directly to the hists
     for proc_inst, h in hists.items():
         scale_factor = getattr(proc_inst, "scale", None) or proc_inst.x("scale", None)
-        if scale_factor == "stack":
-            # compute the scale factor and round to nearest 10
-            scale_factor = get_stack_integral() / h.sum().value
-            scale_factor = max(round(scale_factor, -1), 1)
         if try_int(scale_factor):
             scale_factor = int(scale_factor)
             hists[proc_inst] = h * scale_factor
-            proc_inst.label += f" x{scale_factor}"
+            # TODO: there might be a prettier way for the label
+            proc_inst.label = f"{proc_inst.label} x{scale_factor}"
 
     return hists
 
 
 def apply_variable_settings(
-    hists: dict,
-    variable_insts: list[od.Variable],
-    variable_settings: dict | None = None,
+        hists: dict,
+        variable_insts: list[od.Variable],
+        variable_settings: dict | None = None,
 ) -> dict:
     """
-    applies settings from *variable_settings* dictionary to the *variable_insts*;
-    the *rebin*, *overflow*, *underflow*, and *slice* settings are directly applied to the histograms
+    applies settings from `variable_settings` dictionary to the `variable_insts`;
+    the `rebin` setting is directly applied to the histograms
     """
     # apply all settings on variable insts
     apply_settings(variable_insts, variable_settings)
 
-    # apply certain  setting directly to histograms
+    # apply rebinning setting directly to histograms
     for var_inst in variable_insts:
-        # rebinning
         rebin_factor = getattr(var_inst, "rebin", None) or var_inst.x("rebin", None)
         if try_int(rebin_factor):
             for proc_inst, h in list(hists.items()):
@@ -149,77 +122,7 @@ def apply_variable_settings(
                 h = h[{var_inst.name: hist.rebin(rebin_factor)}]
                 hists[proc_inst] = h
 
-        # overflow and underflow bins
-        overflow = getattr(var_inst, "overflow", False) or var_inst.x("overflow", False)
-        underflow = getattr(var_inst, "underflow", False) or var_inst.x("underflow", False)
-
-        if overflow or underflow:
-            for proc_inst, h in list(hists.items()):
-                h = use_flow_bins(h, var_inst.name, underflow=underflow, overflow=overflow)
-
-        # slicing
-        slices = getattr(var_inst, "slice", None) or var_inst.x("slice", None)
-        if (
-            slices and isinstance(slices, Iterable) and len(slices) >= 2 and
-            try_complex(slices[0]) and try_complex(slices[1])
-        ):
-            slice_0 = int(slices[0]) if try_int(slices[0]) else complex(slices[0])
-            slice_1 = int(slices[1]) if try_int(slices[1]) else complex(slices[1])
-            for proc_inst, h in list(hists.items()):
-                h = h[{var_inst.name: slice(slice_0, slice_1)}]
-                hists[proc_inst] = h
-
     return hists
-
-
-def use_flow_bins(
-    h_in: hist.Hist,
-    axis_name: str | int,
-    underflow: bool = True,
-    overflow: bool = True,
-) -> hist.Hist:
-    """
-    Adds content of the flow bins of axis *axis_name* of histogram *h_in* to the first/last bin.
-
-    :param h_in: Input histogram
-    :param axis_name: Name or index of the axis of interest.
-    :param underflow: Whether to add the content of the underflow bin to the first bin of axis *axis_name.
-    :param overflow: Whether to add the content of the overflow bin to the last bin of axis *axis_name*.
-    :return: Histogram with underflow and/or overflow content added to the first/last bin of the histogram.
-    """
-    if not overflow and not underflow:
-        print(f"{use_flow_bins.__name__} has nothing to do since overflow and underflow are set to False")
-        return h_in
-
-    axis_idx = axis_name if isinstance(axis_name, int) else h_in.axes.name.index(axis_name)
-
-    # work on a copy of the histogram
-    h_out = h_in.copy()
-    h_view = h_out.view(flow=True)
-
-    if h_out.view().shape[axis_idx] + 2 != h_view.shape[axis_idx]:
-        raise Exception(f"We expect axis {axis_name} to have assigned an underflow and overflow bin")
-
-    # function to get slice of index *idx* from axis *axis_idx*
-    slice_func = lambda idx: tuple(
-        [slice(None)] * axis_idx + [idx] + [slice(None)] * (len(h_out.shape) - axis_idx - 1),
-    )
-
-    if overflow:
-        # replace last bin with last bin + overflow
-        h_view.value[slice_func(-2)] = h_view.value[slice_func(-2)] + h_view.value[slice_func(-1)]
-        h_view.value[slice_func(-1)] = 0
-        h_view.variance[slice_func(-2)] = h_view.variance[slice_func(-2)] + h_view.variance[slice_func(-1)]
-        h_view.variance[slice_func(-1)] = 0
-
-    if underflow:
-        # replace last bin with last bin + overflow
-        h_view.value[slice_func(1)] = h_view.value[slice_func(0)] + h_view.value[slice_func(1)]
-        h_view.value[slice_func(0)] = 0
-        h_view.variance[slice_func(1)] = h_view.variance[slice_func(0)] + h_view.variance[slice_func(1)]
-        h_view.variance[slice_func(0)] = 0
-
-    return h_out
 
 
 def apply_density_to_hists(hists: dict, density: bool | None = False) -> dict:
@@ -292,7 +195,7 @@ def prepare_style_config(
         "legend_cfg": {},
         "annotate_cfg": {"text": category_inst.label},
         "cms_label_cfg": {
-            "lumi": round(0.001 * config_inst.x.luminosity.get("nominal"), 2),  # /pb -> /fb
+            "lumi": config_inst.x.luminosity.get("nominal") / 1000,  # pb -> fb
             "com": config_inst.campaign.ecm,
         },
     }
@@ -356,7 +259,7 @@ def prepare_plot_config(
     # setup plotting configs
     plot_config = OrderedDict()
 
-    # draw stack
+    # draw stack + error bands
     if h_mc_stack is not None:
         mc_norm = sum(h_mc.values()) if shape_norm else 1
         plot_config["mc_stack"] = {
@@ -370,6 +273,13 @@ def prepare_plot_config(
                 "linewidth": [(0 if c is None else 1) for c in mc_colors[::-1]],
             },
         }
+        if not hide_errors:
+            plot_config["mc_uncert"] = {
+                "method": "draw_error_bands",
+                "hist": h_mc,
+                "kwargs": {"norm": mc_norm, "label": "MC stat. unc."},
+                "ratio_kwargs": {"norm": h_mc.values()},
+            }
 
     # draw lines
     for i, h in enumerate(line_hists):
@@ -393,16 +303,6 @@ def prepare_plot_config(
             for key in ("kwargs", "ratio_kwargs"):
                 if key in plot_cfg:
                     plot_cfg[key]["yerr"] = False
-
-    # draw stack error
-    if h_mc_stack is not None and not hide_errors:
-        mc_norm = sum(h_mc.values()) if shape_norm else 1
-        plot_config["mc_uncert"] = {
-            "method": "draw_error_bands",
-            "hist": h_mc,
-            "kwargs": {"norm": mc_norm, "label": "MC stat. unc."},
-            "ratio_kwargs": {"norm": h_mc.values()},
-        }
 
     # draw data
     if data_hists:
@@ -492,96 +392,3 @@ reduce_with.funcs = {
     "maxabs": lambda v: max(abs(np.nanmax(v)), abs(np.nanmin(v))),
     "minabs": lambda v: min(abs(np.nanmax(v)), abs(np.nanmin(v))),
 }
-
-
-def broadcast_1d_to_nd(x: np.array, final_shape: list, axis: int = 1) -> np.array:
-    """
-    Helper function to broadcast a 1d array *x* to an nd array with shape *final_shape*.
-    The length of *x* should be the same as *final_shape[axis]*.
-    """
-    if len(x.shape) != 1:
-        raise Exception("Only 1d arrays allowed")
-    if final_shape[axis] != x.shape[0]:
-        raise Exception(f"Initial shape should match with final shape in requested axis {axis}")
-    initial_shape = [1] * len(final_shape)
-    initial_shape[axis] = x.shape[0]
-    x = np.reshape(x, initial_shape)
-    x = np.broadcast_to(x, final_shape)
-    return x
-
-
-def broadcast_nminus1d_to_nd(x: np.array, final_shape: list, axis: int = 1) -> np.array:
-    """
-    Helper function to broadcast a (n-1)d array *x* to an nd array with shape *final_shape*.
-    *final_shape* should be the same as *x.shape* except that the axis *axis* is missing.
-    """
-    if len(final_shape) - len(x.shape) != 1:
-        raise Exception("Only (n-1)d arrays allowed")
-
-    # shape comparison between x and final_shape
-    _init_shape = list(final_shape)
-    _init_shape.pop(axis)
-    if _init_shape != list(x.shape):
-        raise Exception(
-            f"input shape ({x.shape}) should agree with final_shape {final_shape} "
-            f"after inserting new axis at {axis}",
-        )
-
-    initial_shape = list(x.shape)
-    initial_shape.insert(axis, 1)
-
-    x = np.reshape(x, initial_shape)
-    x = np.broadcast_to(x, final_shape)
-
-    return x
-
-
-def get_profile_width(h_in: hist.Hist, axis: int = 1) -> tuple[np.array, np.array]:
-    """
-    Function that takes a histogram *h_in* and returns the mean and width
-    when profiling over the axis *axis*.
-    """
-    values = h_in.values()
-    centers = h_in.axes[axis].centers
-    centers = broadcast_1d_to_nd(centers, values.shape, axis)
-
-    num = np.sum(values * centers, axis=axis)
-    den = np.sum(values, axis=axis)
-
-    print(num.shape)
-
-    with np.errstate(invalid="ignore"):
-        mean = num / den
-        _mean = broadcast_nminus1d_to_nd(mean, values.shape, axis)
-        width = np.sum(values * (centers - _mean) ** 2, axis=axis) / den
-
-    return mean, width
-
-
-def get_profile_variations(h_in: hist.Hist, axis: int = 1) -> dict[str, hist.Hist]:
-    """
-    Returns a profile histogram plus the up and down variations of the profile
-    from a normal histogram with N-1 axes.
-    The axis given is profiled over and removed from the final histograms.
-    """
-    # start with profile such that we only have to replace the mean
-    # NOTE: how do the variances change for the up/down variations?
-    h_profile = h_in.profile(axis)
-
-    mean, variance = get_profile_width(h_in, axis=axis)
-
-    h_nom = h_profile.copy()
-    h_up = h_profile.copy()
-    h_down = h_profile.copy()
-
-    # we modify the view of h_profile -> do not use h_profile anymore!
-    h_view = h_profile.view()
-
-    h_view.value = mean
-    h_nom[...] = h_view
-    h_view.value = mean + np.sqrt(variance)
-    h_up[...] = h_view
-    h_view.value = mean - np.sqrt(variance)
-    h_down[...] = h_view
-
-    return {"nominal": h_nom, "up": h_up, "down": h_down}

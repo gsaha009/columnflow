@@ -14,7 +14,7 @@ from scinum import Number
 from columnflow.tasks.framework.base import Requirements
 from columnflow.tasks.framework.mixins import (
     CalibratorsMixin, SelectorStepsMixin, ProducersMixin,
-    DatasetsProcessesMixin, CategoriesMixin, WeightProducerMixin,
+    DatasetsProcessesMixin, CategoriesMixin,
 )
 from columnflow.tasks.framework.remote import RemoteWorkflow
 from columnflow.tasks.histograms import MergeHistograms
@@ -24,7 +24,6 @@ from columnflow.util import dev_sandbox, try_int
 class CreateYieldTable(
     DatasetsProcessesMixin,
     CategoriesMixin,
-    WeightProducerMixin,
     ProducersMixin,
     SelectorStepsMixin,
     CalibratorsMixin,

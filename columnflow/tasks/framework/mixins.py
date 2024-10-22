@@ -10,27 +10,23 @@ import gc
 import time
 import itertools
 from collections import Counter
+from typing import Iterable
 
 import luigi
 import law
 import order as od
 
-from columnflow.types import Sequence, Any, Iterable, Union
+from columnflow.types import Sequence, Any
 from columnflow.tasks.framework.base import AnalysisTask, ConfigTask, RESOLVE_DEFAULT
-from columnflow.tasks.framework.parameters import SettingsParameter
 from columnflow.calibration import Calibrator
 from columnflow.selection import Selector
 from columnflow.production import Producer
-from columnflow.weight import WeightProducer
 from columnflow.ml import MLModel
 from columnflow.inference import InferenceModel
 from columnflow.columnar_util import Route, ColumnCollection
-from columnflow.util import maybe_import, DotDict
+from columnflow.util import maybe_import
 
 ak = maybe_import("awkward")
-
-
-logger = law.logger.get_logger(__name__)
 
 
 class CalibratorMixin(ConfigTask):
@@ -73,7 +69,7 @@ class CalibratorMixin(ConfigTask):
         :return: The initialized :py:class:`~columnflow.calibration.Calibrator`
             instance.
         """
-        calibrator_cls: Calibrator = Calibrator.get_cls(calibrator)
+        calibrator_cls = Calibrator.get_cls(calibrator)
         if not calibrator_cls.exposed:
             raise RuntimeError(f"cannot use unexposed calibrator '{calibrator}' in {cls.__name__}")
 
@@ -81,7 +77,7 @@ class CalibratorMixin(ConfigTask):
         return calibrator_cls(inst_dict=inst_dict)
 
     @classmethod
-    def resolve_param_values(cls, params: dict[str, Any]) -> dict[str, Any]:
+    def resolve_param_values(cls, params: dict) -> dict:
         """Resolve parameter values *params* relevant for the
         :py:class:`CalibratorMixin` and all classes it inherits from.
 
@@ -113,7 +109,7 @@ class CalibratorMixin(ConfigTask):
         return params
 
     @classmethod
-    def get_known_shifts(cls, config_inst: od.Config, params: dict[str, Any]) -> tuple[set[str], set[str]]:
+    def get_known_shifts(cls, config_inst: od.Config, params: dict) -> tuple[set[str], set[str]]:
         """Adds set of shifts that the current ``calibrator_inst`` registers to the
         set of known ``shifts`` and ``upstream_shifts``.
 
@@ -144,15 +140,7 @@ class CalibratorMixin(ConfigTask):
         return shifts, upstream_shifts
 
     @classmethod
-    def req_params(cls, inst: law.Task, **kwargs) -> dict[str, Any]:
-        """
-        Returns the required parameters for the task.
-        It prefers `--calibrator` set on task-level via command line.
-
-        :param inst: The current task instance.
-        :param kwargs: Additional keyword arguments.
-        :return: Dictionary of required parameters.
-        """
+    def req_params(cls, inst: law.Task, **kwargs) -> dict:
         # prefer --calibrator set on task-level via cli
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"calibrator"}
 
@@ -168,8 +156,8 @@ class CalibratorMixin(ConfigTask):
     def calibrator_inst(self) -> Calibrator:
         """Access current :py:class:`~columnflow.calibration.Calibrator` instance.
 
-        This method loads the current :py:class:`~columnflow.calibration.Calibrator`
-        *calibrator_inst* from the cache or initializes it.
+        Loads the current :py:class:`~columnflow.calibration.Calibrator` *calibrator_inst* from
+        the cache or initializes it.
         If the calibrator requests a specific ``sandbox``, set this sandbox as
         the environment for the current :py:class:`~law.task.base.Task`.
 
@@ -181,17 +169,14 @@ class CalibratorMixin(ConfigTask):
             # overwrite the sandbox when set
             if self._calibrator_inst.sandbox:
                 self.sandbox = self._calibrator_inst.sandbox
-                # rebuild the sandbox inst when already initialized
-                if self._sandbox_initialized:
-                    self._initialize_sandbox(force=True)
 
         return self._calibrator_inst
 
-    def store_parts(self) -> law.util.InsertableDict[str, str]:
+    def store_parts(self) -> law.util.InsertableDict:
         """Create parts to create the output path to store intermediary results
         for the current :py:class:`~law.task.base.Task`.
 
-        This method calls :py:meth:`store_parts` of the ``super`` class and inserts
+        Calls :py:meth:`store_parts` of the ``super`` class and inserts
         `{"calibrator": "calib__{self.calibrator}"}` before keyword ``version``.
         For more information, see e.g. :py:meth:`~columnflow.tasks.framework.base.ConfigTask.store_parts`.
 
@@ -202,14 +187,6 @@ class CalibratorMixin(ConfigTask):
         return parts
 
     def find_keep_columns(self: ConfigTask, collection: ColumnCollection) -> set[Route]:
-        """
-        Finds the columns to keep based on the *collection*.
-
-        If the collection is `ALL_FROM_CALIBRATOR`, it includes the columns produced by the calibrator.
-
-        :param collection: The collection of columns.
-        :return: Set of columns to keep.
-        """
         columns = super().find_keep_columns(collection)
 
         if collection == ColumnCollection.ALL_FROM_CALIBRATOR:
@@ -265,10 +242,7 @@ class CalibratorsMixin(ConfigTask):
         return insts
 
     @classmethod
-    def resolve_param_values(
-        cls,
-        params: law.util.InsertableDict[str, Any],
-    ) -> law.util.InsertableDict[str, Any]:
+    def resolve_param_values(cls, params: law.util.InsertableDict) -> law.util.InsertableDict:
         """Resolve values *params* and check against possible default values and
         calibrator groups.
 
@@ -299,11 +273,7 @@ class CalibratorsMixin(ConfigTask):
         return params
 
     @classmethod
-    def get_known_shifts(
-        cls,
-        config_inst: od.Config,
-        params: dict[str, Any],
-    ) -> tuple[set[str], set[str]]:
+    def get_known_shifts(cls, config_inst: od.Config, params: dict) -> tuple[set[str], set[str]]:
         """Adds set of all shifts that the list of ``calibrator_insts`` register to the
         set of known ``shifts`` and ``upstream_shifts``.
 
@@ -334,17 +304,7 @@ class CalibratorsMixin(ConfigTask):
         return shifts, upstream_shifts
 
     @classmethod
-    def req_params(cls, inst: law.Task, **kwargs) -> dict[str, Any]:
-        """
-        Returns the required parameters for the task.
-
-        It prefers ``--calibrators`` set on task-level via command line.
-
-        :param inst: The current task instance.
-        :param kwargs: Additional keyword arguments.
-        :return: Dictionary of required parameters.
-        """
-
+    def req_params(cls, inst: law.Task, **kwargs) -> dict:
         # prefer --calibrators set on task-level via cli
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"calibrators"}
 
@@ -392,15 +352,7 @@ class CalibratorsMixin(ConfigTask):
         return parts
 
     def find_keep_columns(self: ConfigTask, collection: ColumnCollection) -> set[Route]:
-        """
-        Finds the columns to keep based on the *collection*.
-
-        If the collection is ``ALL_FROM_CALIBRATORS``, it includes the columns produced by the calibrators.
-
-        :param collection: The collection of columns.
-        :return: Set of columns to keep.
-        """
-        columns: set[Route] = super().find_keep_columns(collection)
+        columns = super().find_keep_columns(collection)
 
         if collection == ColumnCollection.ALL_FROM_CALIBRATORS:
             columns |= set.union(*(
@@ -452,7 +404,7 @@ class SelectorMixin(ConfigTask):
         return selector_cls(inst_dict=inst_dict)
 
     @classmethod
-    def resolve_param_values(cls, params: dict[str, Any]) -> dict:
+    def resolve_param_values(cls, params: dict) -> dict:
         """Resolve values *params* and check against possible default values and
         selector groups.
 
@@ -485,7 +437,7 @@ class SelectorMixin(ConfigTask):
     def get_known_shifts(
         cls,
         config_inst: od.Config,
-        params: dict[str, Any],
+        params: dict,
     ) -> tuple[set[str], set[str]]:
         """Adds set of shifts that the current ``selector_inst`` registers to the
         set of known ``shifts`` and ``upstream_shifts``.
@@ -517,17 +469,7 @@ class SelectorMixin(ConfigTask):
         return shifts, upstream_shifts
 
     @classmethod
-    def req_params(cls, inst: law.Task, **kwargs) -> dict[str, Any]:
-        """Get the required parameters for the task, preferring the ``--selector`` set on task-level via CLI.
-
-        This method first checks if the --selector parameter is set at the task-level via the command line.
-        If it is, this parameter is preferred and added to the '_prefer_cli' key in the kwargs dictionary.
-        The method then calls the 'req_params' method of the superclass with the updated kwargs.
-
-        :param inst: The current task instance.
-        :param kwargs: Additional keyword arguments that may contain parameters for the task.
-        :return: A dictionary of parameters required for the task.
-        """
+    def req_params(cls, inst: law.Task, **kwargs) -> dict:
         # prefer --selector set on task-level via cli
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"selector"}
 
@@ -556,9 +498,6 @@ class SelectorMixin(ConfigTask):
             # overwrite the sandbox when set
             if self._selector_inst.sandbox:
                 self.sandbox = self._selector_inst.sandbox
-                # rebuild the sandbox inst when already initialized
-                if self._sandbox_initialized:
-                    self._initialize_sandbox(force=True)
 
         return self._selector_inst
 
@@ -641,17 +580,7 @@ class SelectorStepsMixin(SelectorMixin):
         return params
 
     @classmethod
-    def req_params(cls, inst: law.Task, **kwargs) -> dict[str, Any]:
-        """Get the required parameters for the task, preferring the --selector-steps set on task-level via CLI.
-
-        This method first checks if the --selector-steps parameter is set at the task-level via the command line.
-        If it is, this parameter is preferred and added to the '_prefer_cli' key in the kwargs dictionary.
-        The method then calls the 'req_params' method of the superclass with the updated kwargs.
-
-        :param inst: The current task instance.
-        :param kwargs: Additional keyword arguments that may contain parameters for the task.
-        :return: A dictionary of parameters required for the task.
-        """
+    def req_params(cls, inst: law.Task, **kwargs) -> dict:
         # prefer --selector-steps set on task-level via cli
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"selector_steps"}
 
@@ -719,7 +648,7 @@ class ProducerMixin(ConfigTask):
         :return: The initialized :py:class:`~columnflow.production.Producer`
             instance.
         """
-        producer_cls: Producer = Producer.get_cls(producer)
+        producer_cls = Producer.get_cls(producer)
         if not producer_cls.exposed:
             raise RuntimeError(f"cannot use unexposed producer '{producer}' in {cls.__name__}")
 
@@ -727,7 +656,7 @@ class ProducerMixin(ConfigTask):
         return producer_cls(inst_dict=inst_dict)
 
     @classmethod
-    def resolve_param_values(cls, params: dict[str, Any]) -> dict[str, Any]:
+    def resolve_param_values(cls, params: dict) -> dict:
         """Resolve parameter values *params* relevant for the
         :py:class:`ProducerMixin` and all classes it inherits from.
 
@@ -759,7 +688,7 @@ class ProducerMixin(ConfigTask):
         return params
 
     @classmethod
-    def get_known_shifts(cls, config_inst: od.Config, params: dict[str, Any]) -> tuple[set[str], set[str]]:
+    def get_known_shifts(cls, config_inst: od.Config, params: dict) -> tuple[set[str], set[str]]:
         """Adds set of shifts that the current ``producer_inst`` registers to the
         set of known ``shifts`` and ``upstream_shifts``.
 
@@ -790,17 +719,7 @@ class ProducerMixin(ConfigTask):
         return shifts, upstream_shifts
 
     @classmethod
-    def req_params(cls, inst: law.Task, **kwargs) -> dict[str, Any]:
-        """Get the required parameters for the task, preferring the ``--producer`` set on task-level via CLI.
-
-        This method first checks if the ``--producer`` parameter is set at the task-level via the command line.
-        If it is, this parameter is preferred and added to the '_prefer_cli' key in the kwargs dictionary.
-        The method then calls the 'req_params' method of the superclass with the updated kwargs.
-
-        :param inst: The current task instance.
-        :param kwargs: Additional keyword arguments that may contain parameters for the task.
-        :return: A dictionary of parameters required for the task.
-        """
+    def req_params(cls, inst: law.Task, **kwargs) -> dict:
         # prefer --producer set on task-level via cli
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"producer"}
 
@@ -829,13 +748,10 @@ class ProducerMixin(ConfigTask):
             # overwrite the sandbox when set
             if self._producer_inst.sandbox:
                 self.sandbox = self._producer_inst.sandbox
-                # rebuild the sandbox inst when already initialized
-                if self._sandbox_initialized:
-                    self._initialize_sandbox(force=True)
 
         return self._producer_inst
 
-    def store_parts(self) -> law.util.InsertableDict[str, str]:
+    def store_parts(self) -> law.util.InsertableDict:
         """Create parts to create the output path to store intermediary results
         for the current :py:class:`~law.task.base.Task`.
 
@@ -851,15 +767,6 @@ class ProducerMixin(ConfigTask):
         return parts
 
     def find_keep_columns(self: ConfigTask, collection: ColumnCollection) -> set[Route]:
-        """Finds the columns to keep based on the *collection*.
-
-        This method first calls the 'find_keep_columns' method of the superclass with the given *collection*.
-        If the *collection* is equal to ``ALL_FROM_PRODUCER``, it adds the
-        columns produced by the producer instance to the set of columns.
-
-        :param collection: The collection of columns.
-        :return: A set of columns to keep.
-        """
         columns = super().find_keep_columns(collection)
 
         if collection == ColumnCollection.ALL_FROM_PRODUCER:
@@ -913,10 +820,7 @@ class ProducersMixin(ConfigTask):
         return insts
 
     @classmethod
-    def resolve_param_values(
-        cls,
-        params: law.util.InsertableDict[str, Any],
-    ) -> law.util.InsertableDict[str, Any]:
+    def resolve_param_values(cls, params: law.util.InsertableDict) -> law.util.InsertableDict:
         """Resolve values *params* and check against possible default values and
         producer groups.
 
@@ -947,7 +851,7 @@ class ProducersMixin(ConfigTask):
         return params
 
     @classmethod
-    def get_known_shifts(cls, config_inst: od.Config, params: dict[str, Any]) -> tuple[set[str], set[str]]:
+    def get_known_shifts(cls, config_inst: od.Config, params: dict) -> tuple[set[str], set[str]]:
         """Adds set of all shifts that the list of ``producer_insts`` register to the
         set of known ``shifts`` and ``upstream_shifts``.
 
@@ -978,17 +882,7 @@ class ProducersMixin(ConfigTask):
         return shifts, upstream_shifts
 
     @classmethod
-    def req_params(cls, inst: law.Task, **kwargs) -> dict[str, Any]:
-        """Get the required parameters for the task, preferring the --producers set on task-level via CLI.
-
-        This method first checks if the --producers parameter is set at the task-level via the command line.
-        If it is, this parameter is preferred and added to the '_prefer_cli' key in the kwargs dictionary.
-        The method then calls the 'req_params' method of the superclass with the updated kwargs.
-
-        :param inst: The current task instance.
-        :param kwargs: Additional keyword arguments that may contain parameters for the task.
-        :return: A dictionary of parameters required for the task.
-        """
+    def req_params(cls, inst: law.Task, **kwargs) -> dict:
         # prefer --producers set on task-level via cli
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"producers"}
 
@@ -1038,15 +932,6 @@ class ProducersMixin(ConfigTask):
         return parts
 
     def find_keep_columns(self: ConfigTask, collection: ColumnCollection) -> set[Route]:
-        """Finds the columns to keep based on the *collection*.
-
-        This method first calls the 'find_keep_columns' method of the superclass with the given *collection*.
-        If the *collection* is equal to ``ALL_FROM_PRODUCERS``, it adds the
-        columns produced by all producer instances to the set of columns.
-
-        :param collection: The collection of columns.
-        :return: A set of columns to keep.
-        """
         columns = super().find_keep_columns(collection)
 
         if collection == ColumnCollection.ALL_FROM_PRODUCERS:
@@ -1070,30 +955,10 @@ class MLModelMixinBase(AnalysisTask):
         description="the name of the ML model to be applied",
     )
 
-    ml_model_settings = SettingsParameter(
-        default=DotDict(),
-        description="settings passed to the init function of the ML model",
-    )
-
     exclude_params_repr_empty = {"ml_model"}
 
-    @property
-    def ml_model_repr(self):
-        """Returns a string representation of the ML model instance."""
-        return str(self.ml_model_inst)
-
     @classmethod
-    def req_params(cls, inst: law.Task, **kwargs) -> dict[str, Any]:
-        """Get the required parameters for the task, preferring the ``--ml-model`` set on task-level via CLI.
-
-        This method first checks if the ``--ml-model`` parameter is set at the task-level via the command line.
-        If it is, this parameter is preferred and added to the '_prefer_cli' key in the kwargs dictionary.
-        The method then calls the 'req_params' method of the superclass with the updated kwargs.
-
-        :param inst: The current task instance.
-        :param kwargs: Additional keyword arguments that may contain parameters for the task.
-        :return: A dictionary of parameters required for the task.
-        """
+    def req_params(cls, inst: law.Task, **kwargs) -> dict:
         # prefer --ml-model set on task-level via cli
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"ml_model"}
 
@@ -1104,22 +969,26 @@ class MLModelMixinBase(AnalysisTask):
         cls,
         ml_model: str,
         analysis_inst: od.Analysis,
-        requested_configs: list[str] | None = None,
+        requested_configs: list[str] or None = None,
         **kwargs,
     ) -> MLModel:
-        """Get requested *ml_model* instance.
+        """Get requested *ml_model*.
 
-        This method retrieves the requested *ml_model* instance.
-        If *requested_configs* are provided, they are used for the training of
-        the ML application.
+        :py:class:`~columnflow.ml.MLModel` instance is either initalized or
+        loaded from cache.
+        During the initialization, the *analysis_inst* as well as all *kwargs*
+        are forwarded to the init function of the *ml_model* class.
 
-        :param ml_model: Name of :py:class:`~columnflow.ml.MLModel` to load.
-        :param analysis_inst: Forward this analysis inst to the init function of new MLModel sub class.
-        :param requested_configs: Configs needed for the training of the ML application.
-        :param kwargs: Additional keyword arguments to forward to the :py:class:`~columnflow.ml.MLModel` instance.
+        :param ml_model: Name of :py:class:`~columnflow.ml.MLModel` to load
+        :param analysis_inst: Forward this analysis inst to the init function of
+            new MLModel sub class
+        :param requested_configs: Configs needed for the training of the ML
+            application
+        :param kwargs: Additional keyword arguments to forward to the
+            :py:class:`~columnflow.ml.MLModel` instance
         :return: :py:class:`~columnflow.ml.MLModel` instance.
         """
-        ml_model_inst: MLModel = MLModel.get_cls(ml_model)(analysis_inst, **kwargs)
+        ml_model_inst = MLModel.get_cls(ml_model)(analysis_inst, **kwargs)
 
         if requested_configs:
             configs = ml_model_inst.training_configs(list(requested_configs))
@@ -1130,23 +999,10 @@ class MLModelMixinBase(AnalysisTask):
 
     def events_used_in_training(
         self,
-        config_inst: od.config.Config,
-        dataset_inst: od.dataset.Dataset,
-        shift_inst: od.shift.Shift,
+        config_inst: od.Config,
+        dataset_inst: od.Dataset,
+        shift_inst: od.Shift,
     ) -> bool:
-        """Evaluate whether the events for the combination of *dataset_inst* and
-        *shift_inst* shall be used in the training.
-
-        This method checks if the *dataset_inst* is in the set of datasets of
-        the current `ml_model_inst` based on the given *config_inst*. Additionally,
-        the function checks that the *shift_inst* does not have the tag
-        `"disjoint_from_nominal"`.
-
-        :param config_inst: The configuration instance.
-        :param dataset_inst: The dataset instance.
-        :param shift_inst: The shift instance.
-        :return: True if the events shall be used in the training, False otherwise.
-        """
         # evaluate whether the events for the combination of dataset_inst and shift_inst
         # shall be used in the training
         return (
@@ -1156,10 +1012,6 @@ class MLModelMixinBase(AnalysisTask):
 
 
 class MLModelTrainingMixin(MLModelMixinBase):
-    """A mixin class for training machine learning models.
-
-    This class provides parameters for configuring the training of machine learning models.
-    """
 
     configs = law.CSVParameter(
         default=(),
@@ -1203,23 +1055,7 @@ class MLModelTrainingMixin(MLModelMixinBase):
         ml_model_inst: MLModel,
         params: dict[str, Any],
     ) -> tuple[tuple[str]]:
-        """Resolve the calibrators for the given ML model instance.
-
-        This method retrieves the calibrators from the parameters *params* and
-        broadcasts them to the configs if necessary.
-        It also resolves `calibrator_groups` and `default_calibrator` from the config(s) associated
-        with this ML model instance, and validates the number of sequences.
-        Finally, it checks the retrieved calibrators against
-        the training calibrators of the model using
-        :py:meth:`~columnflow.ml.MLModel.training_calibrators` and instantiates them if necessary.
-
-        :param ml_model_inst: The ML model instance.
-        :param params: A dictionary of parameters that may contain the calibrators.
-        :return: A tuple of tuples containing the resolved calibrators.
-        :raises Exception: If the number of calibrator sequences does not match
-            the number of configs used by the ML model.
-        """
-        calibrators: Union[tuple[str], tuple[tuple[str]]] = params.get("calibrators") or ((),)
+        calibrators = params.get("calibrators") or ((),)
 
         # broadcast to configs
         n_configs = len(ml_model_inst.config_insts)
@@ -1265,22 +1101,6 @@ class MLModelTrainingMixin(MLModelMixinBase):
         ml_model_inst: MLModel,
         params: dict[str, Any],
     ) -> tuple[str]:
-        """Resolve the selectors for the given ML model instance.
-
-        This method retrieves the selectors from the parameters *params* and
-        broadcasts them to the configs if necessary.
-        It also resolves `default_selector` from the config(s) associated
-        with this ML model instance, validates the number of sequences.
-        Finally, it checks the retrieved selectors against the training selectors
-        of the model, using
-        :py:meth:`~columnflow.ml.MLModel.training_selector`, and instantiates them.
-
-        :param ml_model_inst: The ML model instance.
-        :param params: A dictionary of parameters that may contain the selectors.
-        :return: A tuple containing the resolved selectors.
-        :raises Exception: If the number of selector sequences does not match
-            the number of configs used by the ML model.
-        """
         selectors = params.get("selectors") or (None,)
 
         # broadcast to configs
@@ -1326,22 +1146,6 @@ class MLModelTrainingMixin(MLModelMixinBase):
         ml_model_inst: MLModel,
         params: dict[str, Any],
     ) -> tuple[tuple[str]]:
-        """Resolve the producers for the given ML model instance.
-
-        This method retrieves the producers from the parameters *params* and
-        broadcasts them to the configs if necessary.
-        It also resolves `producer_groups` and `default_producer` from the config(s) associated
-        with this ML model instance, validates the number of sequences.
-        Finally, it checks the retrieved producers against the training producers
-        of the model, using
-        :py:meth:`~columnflow.ml.MLModel.training_producers`, and instantiates them.
-
-        :param ml_model_inst: The ML model instance.
-        :param params: A dictionary of parameters that may contain the producers.
-        :return: A tuple of tuples containing the resolved producers.
-        :raises Exception: If the number of producer sequences does not match
-            the number of configs used by the ML model.
-        """
         producers = params.get("producers") or ((),)
 
         # broadcast to configs
@@ -1384,27 +1188,13 @@ class MLModelTrainingMixin(MLModelMixinBase):
 
     @classmethod
     def resolve_param_values(cls, params: dict[str, Any]) -> dict[str, Any]:
-        """Resolve the parameter values for the given parameters.
-
-        This method retrieves the parameters and resolves the ML model instance, configs,
-        calibrators, selectors, and producers. It also calls the model's setup hook.
-
-        :param params: A dictionary of parameters that may contain the analysis instance and ML model.
-        :return: A dictionary containing the resolved parameters.
-        :raises Exception: If the ML model instance received configs to define training configs,
-            but did not define any.
-        """
         params = super().resolve_param_values(params)
 
         if "analysis_inst" in params and "ml_model" in params:
             analysis_inst = params["analysis_inst"]
 
             # NOTE: we could try to implement resolving the default ml_model here
-            ml_model_inst = cls.get_ml_model_inst(
-                params["ml_model"],
-                analysis_inst,
-                parameters=params["ml_model_settings"],
-            )
+            ml_model_inst = cls.get_ml_model_inst(params["ml_model"], analysis_inst)
             params["ml_model_inst"] = ml_model_inst
 
             # resolve configs
@@ -1433,29 +1223,15 @@ class MLModelTrainingMixin(MLModelMixinBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
         # get the ML model instance
         self.ml_model_inst = self.get_ml_model_inst(
             self.ml_model,
             self.analysis_inst,
             configs=list(self.configs),
-            parameters=self.ml_model_settings,
         )
 
-    def store_parts(self) -> law.util.InsertableDict[str, str]:
-        """Generate a dictionary of store parts for the current instance.
-
-        This method extends the base method to include additional parts related to machine learning
-        model configurations, calibrators, selectors, producers (CSP), and the ML model instance itself.
-        If the list of either of the CSPs is empty, the corresponding part is set to ``"none"``,
-        otherwise, the first two elements of the list are joined with ``"__"``.
-        If the list of either of the CSPs contains more than two elements, the part is extended
-        with the number of elements and a hash of the remaining elements, which is
-        created with :py:meth:`law.util.create_hash`.
-        The parts are represented as strings and are used to create unique identifiers for the
-        instance's output.
-
-        :return: An InsertableDict containing the store parts.
-        """
+    def store_parts(self) -> law.util.InsertableDict:
         parts = super().store_parts()
         # since MLTraining is no CalibratorsMixin, SelectorMixin, ProducerMixin, ConfigTask,
         # all these parts are missing in the `store_parts`
@@ -1491,7 +1267,7 @@ class MLModelTrainingMixin(MLModelMixinBase):
             parts.insert_before("version", label, f"{label}__{part}")
 
         if self.ml_model_inst:
-            parts.insert_before("version", "ml_model", f"ml__{self.ml_model_repr}")
+            parts.insert_before("version", "ml_model", f"ml__{self.ml_model_inst.cls_name}")
 
         return parts
 
@@ -1532,7 +1308,6 @@ class MLModelMixin(ConfigTask, MLModelMixinBase):
                     params["ml_model"],
                     analysis_inst,
                     requested_configs=[config_inst],
-                    parameters=params["ml_model_settings"],
                 )
             elif not cls.allow_empty_ml_model:
                 raise Exception(f"no ml_model configured for {cls.task_family}")
@@ -1549,14 +1324,13 @@ class MLModelMixin(ConfigTask, MLModelMixinBase):
                 self.ml_model,
                 self.analysis_inst,
                 requested_configs=[self.config_inst],
-                parameters=self.ml_model_settings,
             )
 
     def store_parts(self) -> law.util.InsertableDict:
         parts = super().store_parts()
 
         if self.ml_model_inst:
-            parts.insert_before("version", "ml_model", f"ml__{self.ml_model_repr}")
+            parts.insert_before("version", "ml_model", f"ml__{self.ml_model_inst.cls_name}")
 
         return parts
 
@@ -1577,7 +1351,7 @@ class MLModelDataMixin(MLModelMixin):
         parts = super().store_parts()
 
         # replace the ml_model entry
-        store_name = self.ml_model_inst.store_name or self.ml_model_repr
+        store_name = self.ml_model_inst.store_name or self.ml_model_inst.cls_name
         parts.insert_before("ml_model", "ml_data", f"ml__{store_name}")
         parts.pop("ml_model")
 
@@ -1596,12 +1370,6 @@ class MLModelsMixin(ConfigTask):
     allow_empty_ml_models = True
 
     exclude_params_repr_empty = {"ml_models"}
-
-    @property
-    def ml_models_repr(self):
-        """Returns a string representation of the ML models."""
-        ml_models_repr = "__".join([str(model_inst) for model_inst in self.ml_model_insts])
-        return ml_models_repr
 
     @classmethod
     def resolve_param_values(cls, params: dict[str, Any]) -> dict[str, Any]:
@@ -1658,7 +1426,8 @@ class MLModelsMixin(ConfigTask):
         parts = super().store_parts()
 
         if self.ml_model_insts:
-            parts.insert_before("version", "ml_models", f"ml__{self.ml_models_repr}")
+            part = "__".join(model_inst.cls_name for model_inst in self.ml_model_insts)
+            parts.insert_before("version", "ml_models", f"ml__{part}")
 
         return parts
 
@@ -2061,102 +1830,27 @@ class ShiftSourcesMixin(ConfigTask):
         return f"{len(self.shift_sources)}_{law.util.create_hash(sorted(self.shift_sources))}"
 
 
-class WeightProducerMixin(ConfigTask):
-
-    weight_producer = luigi.Parameter(
-        default=RESOLVE_DEFAULT,
-        description="the name of the weight producer to be used; default: value of the "
-        "'default_weight_producer' config",
-    )
-
-    # decides whether the task itself runs the weight producer and implements its shifts
-    register_weight_producer_shifts = False
+class EventWeightMixin(ConfigTask):
 
     @classmethod
-    def get_weight_producer_inst(
-        cls,
-        weight_producer: str,
-        kwargs: dict | None = None,
-    ) -> WeightProducer:
-        weight_producer_cls = WeightProducer.get_cls(weight_producer)
-        if not weight_producer_cls.exposed:
-            raise RuntimeError(
-                f"cannot use unexposed weight producer '{weight_producer}' in {cls.__name__}",
-            )
-
-        inst_dict = cls.get_weight_producer_kwargs(**kwargs) if kwargs else None
-        return weight_producer_cls(inst_dict=inst_dict)
-
-    @classmethod
-    def resolve_param_values(cls, params: dict[str, Any]) -> dict[str, Any]:
-        params = super().resolve_param_values(params)
-
-        config_inst = params.get("config_inst")
-        if config_inst:
-            # add the default weight producer when empty
-            params["weight_producer"] = cls.resolve_config_default(
-                params,
-                params.get("weight_producer"),
-                container=config_inst,
-                default_str="default_weight_producer",
-                multiple=False,
-            )
-            if params["weight_producer"] is None:
-                raise Exception(
-                    f"no weight producer configured for task. {cls.task_family}. "
-                    "As of 02.05.2024, it is required to pass a weight_producer for tasks creating "
-                    "histograms. You can add a 'default_weight_producer' to your config or directly "
-                    "add the weight_producer on command line via the '--weight_producer' parameter. "
-                    "To reproduce results from before this date, you can use the "
-                    "'all_weights' weight_producer defined in columnflow.weight.all_weights, e.g. by adding "
-                    "The following line to your config: \n"
-                    "config.x.default_weight_producer = \"all_weights\"",
-                )
-            params["weight_producer_inst"] = cls.get_weight_producer_inst(
-                params["weight_producer"],
-                params,
-            )
-
-        return params
-
-    @classmethod
-    def get_known_shifts(
-        cls,
-        config_inst: od.Config,
-        params: dict[str, Any],
-    ) -> tuple[set[str], set[str]]:
+    def get_known_shifts(cls, config_inst: od.Config, params: dict) -> tuple[set[str], set[str]]:
         shifts, upstream_shifts = super().get_known_shifts(config_inst, params)
 
-        # get the weight producer, update it and add its shifts
-        weight_producer_inst = params.get("weight_producer_inst")
-        if weight_producer_inst:
-            if cls.register_weight_producer_shifts:
-                shifts |= weight_producer_inst.all_shifts
-            else:
-                upstream_shifts |= weight_producer_inst.all_shifts
+        # add shifts introduced by event weights
+        if config_inst.has_aux("event_weights"):
+            for shift_insts in config_inst.x.event_weights.values():
+                shifts |= {shift_inst.name for shift_inst in shift_insts}
+
+        # optionally also for weights defined by a dataset
+        if "dataset" in params:
+            requested_dataset = params.get("dataset")
+            if requested_dataset not in (None, law.NO_STR):
+                dataset_inst = config_inst.get_dataset(requested_dataset)
+                if dataset_inst.has_aux("event_weights"):
+                    for shift_insts in dataset_inst.x.event_weights.values():
+                        shifts |= {shift_inst.name for shift_inst in shift_insts}
 
         return shifts, upstream_shifts
-
-    def __init__(self: WeightProducerMixin, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-
-        # cache for weight producer inst
-        self._weight_producer_inst = None
-
-    @property
-    def weight_producer_inst(self: WeightProducerMixin) -> WeightProducer:
-        if self._weight_producer_inst is None:
-            self._weight_producer_inst = self.get_weight_producer_inst(
-                self.weight_producer,
-                {"task": self},
-            )
-
-        return self._weight_producer_inst
-
-    def store_parts(self: WeightProducerMixin) -> law.util.InsertableDict[str, str]:
-        parts = super().store_parts()
-        parts.insert_before("version", "weightprod", f"weight__{self.weight_producer}")
-        return parts
 
 
 class ChunkedIOMixin(AnalysisTask):
@@ -2257,36 +1951,3 @@ class ChunkedIOMixin(AnalysisTask):
         # eager, overly cautious gc
         del handler
         gc.collect()
-
-
-class HistHookMixin(ConfigTask):
-
-    hist_hook = luigi.Parameter(
-        default=law.NO_STR,
-        description="name of a function in the config's auxiliary dictionary 'hist_hooks' that is "
-        "invoked before plotting to update a potentially nested dictionary of histograms; "
-        "default: empty",
-    )
-
-    def invoke_hist_hook(self, hists: dict) -> dict:
-        """
-        Hook to update histograms before plotting.
-        """
-        if self.hist_hook in (None, "", law.NO_STR):
-            return hists
-
-        # get the hook from the config instance
-        hooks = self.config_inst.x("hist_hooks", {})
-        if self.hist_hook not in hooks:
-            raise ValueError(
-                f"hist hook '{self.hist_hook}' not found in 'hist_hooks' auxiliary entry of config",
-            )
-        func = hooks[self.hist_hook]
-        if not callable(func):
-            raise ValueError(f"hist hook '{self.hist_hook}' is not callable: {func}")
-
-        # invoke it
-        self.publish_message(f"invoking hist hook '{self.hist_hook}'")
-        hists = func(self, hists)
-
-        return hists

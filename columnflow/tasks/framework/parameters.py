@@ -6,35 +6,9 @@ Custom luigi parameters.
 
 from __future__ import annotations
 
-import getpass
-
-import luigi
 import law
 
-from columnflow.util import try_float, try_complex, DotDict
-from columnflow.types import Iterable
-
-
-user_parameter_inst = luigi.Parameter(
-    default=getpass.getuser(),
-    description="the user running the current task, mainly for central schedulers to distinguish "
-    "between tasks that should or should not be run in parallel by multiple users; "
-    "default: current user",
-)
-
-_default_last_bin_edge_inclusive = law.config.get_expanded_bool(
-    "analysis",
-    "default_histogram_last_edge_inclusive",
-    None,
-)
-last_edge_inclusive_inst = law.OptionalBoolParameter(
-    default=_default_last_bin_edge_inclusive,
-    significant=False,
-    description="whether to shift entries that have the exact value of the right-most bin edge "
-    "slightly to the left such that they end up in the last instead of the overflow bin; when "
-    "'None', shifting is performed for all variable axes that are continuous and non-circular; "
-    f"default: {_default_last_bin_edge_inclusive}",
-)
+from columnflow.util import try_float, DotDict
 
 
 class SettingsParameter(law.CSVParameter):
@@ -52,35 +26,21 @@ class SettingsParameter(law.CSVParameter):
         p.serialize({"param1": 2, "param2": False})
         => "param1=2,param2=False"
     """
-    settings_delimiter = "="
-    tuple_delimiter = ";"
 
     @classmethod
     def parse_setting(cls, setting: str) -> tuple[str, float | bool | str]:
-        pair = setting.split(cls.settings_delimiter, 1)
+        pair = setting.split("=", 1)
         key, value = pair if len(pair) == 2 else (pair[0], "True")
-        if ";" in value:
-            # split by ";" and parse each value
-            value = tuple(cls.parse_value(v) for v in value.split(cls.tuple_delimiter))
-        else:
-            value = cls.parse_value(value)
-        return (key, value)
-
-    @classmethod
-    def parse_value(cls, value):
         if try_float(value):
             value = float(value)
-        elif try_complex(value):
-            value = complex(value)
         elif value.lower() == "true":
             value = True
         elif value.lower() == "false":
             value = False
-        return value
+        return (key, value)
 
     @classmethod
-    def serialize_setting(cls, name: str, value: str | Iterable[str]) -> str:
-        value = ";".join(str(v) for v in law.util.make_tuple(value))
+    def serialize_setting(cls, name: str, value: str) -> str:
         return f"{name}={value}"
 
     def __init__(self, **kwargs):
@@ -143,6 +103,7 @@ class MultiSettingsParameter(law.MultiCSVParameter):
         )
         # next, merge dicts
         outputs = law.util.merge_dicts(*outputs, deep=True)
+
         return outputs
 
     def serialize(self, value):
