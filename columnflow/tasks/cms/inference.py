@@ -39,14 +39,90 @@ class CreateDatacards(
     def create_branch_map(self):
         return list(self.inference_model_inst.categories)
 
+    def get_mc_datasets(self, proc_obj: dict) -> list[str]:
+        """
+        Helper to find mc datasets.
+
+        :param proc_obj: process object from an InferenceModel
+        :return: List of dataset names corresponding to the process *proc_obj*.
+        """
+        # when datasets are defined on the process object itself, interpret them as patterns
+        if proc_obj.config_mc_datasets:
+            return [
+                dataset.name
+                for dataset in self.config_inst.datasets
+                if (
+                    dataset.is_mc and
+                    law.util.multi_match(dataset.name, proc_obj.config_mc_datasets, mode=any)
+                )
+            ]
+
+        # if not, check the config
+        return [
+            dataset_inst.name
+            for dataset_inst in get_datasets_from_process(self.config_inst, proc_obj.config_process)
+        ]
+
+    def get_data_datasets(self, cat_obj: dict) -> list[str]:
+        """
+        Helper to find data datasets.
+
+        :param cat_obj: category object from an InferenceModel
+        :return: List of dataset names corresponding to the category *cat_obj*.
+        """
+        if not cat_obj.config_data_datasets:
+            return []
+
+        return [
+            dataset.name
+            for dataset in self.config_inst.datasets
+            if (
+                dataset.is_data and
+                law.util.multi_match(dataset.name, cat_obj.config_data_datasets, mode=any)
+            )
+        ]
+
     def workflow_requires(self):
         reqs = super().workflow_requires()
 
-        # simply require the requirements of all branch tasks right now
-        reqs["merged_hists"] = set(sum((
-            law.util.flatten(t.requires())
-            for t in self.get_branch_tasks().values()
-        ), []))
+        # initialize defaultdict, mapping datasets to variables + shift_sources
+        mc_dataset_params = defaultdict(lambda: {"variables": set(), "shift_sources": set()})
+        data_dataset_params = defaultdict(lambda: {"variables": set()})
+
+        for cat_obj in self.branch_map.values():
+            for proc_obj in cat_obj.processes:
+                for dataset in self.get_mc_datasets(proc_obj):
+                    # add all required variables and shifts per dataset
+                    mc_dataset_params[dataset]["variables"].add(cat_obj.config_variable)
+                    mc_dataset_params[dataset]["shift_sources"].update(
+                        param_obj.config_shift_source
+                        for param_obj in proc_obj.parameters
+                        if self.inference_model_inst.require_shapes_for_parameter(param_obj)
+                    )
+
+            for dataset in self.get_data_datasets(cat_obj):
+                data_dataset_params[dataset]["variables"].add(cat_obj.config_variable)
+
+        # set workflow requirements per mc dataset
+        reqs["merged_hists"] = set(
+            self.reqs.MergeShiftedHistograms.req_different_branching(
+                self,
+                dataset=dataset,
+                shift_sources=tuple(params["shift_sources"]),
+                variables=tuple(params["variables"]),
+            )
+            for dataset, params in mc_dataset_params.items()
+        )
+
+        # add workflow requirements per data dataset
+        for dataset, params in data_dataset_params.items():
+            reqs["merged_hists"].add(
+                self.reqs.MergeHistograms.req_different_branching(
+                    self,
+                    dataset=dataset,
+                    variables=tuple(params["variables"]),
+                ),
+            )
 
         return reqs
 
@@ -91,7 +167,7 @@ class CreateDatacards(
                     branch=-1,
                     _exclude={"branches"},
                 )
-                for dataset in cat_obj.config_data_datasets
+                for dataset in self.get_data_datasets(cat_obj)
             }
 
         return reqs

@@ -6,6 +6,7 @@ Tasks related to selecting events and performing post-selection bookkeeping.
 
 from collections import defaultdict
 
+import luigi
 import law
 
 from columnflow.tasks.framework.base import Requirements, AnalysisTask, DatasetTask, wrapper_factory
@@ -38,7 +39,8 @@ class SelectEvents(
         CalibrateEvents=CalibrateEvents,
     )
 
-    # register shifts found in the chosen selector to this task
+    # register sandbox and shifts found in the chosen selector to this task
+    register_selector_sandbox = True
     register_selector_shifts = True
 
     # strategy for handling missing source columns when adding aliases on event chunks
@@ -61,7 +63,7 @@ class SelectEvents(
             reqs = law.util.merge_dicts(reqs, t.workflow_requires(), inplace=True)
 
         # add selector dependent requirements
-        reqs["selector"] = self.selector_inst.run_requires()
+        reqs["selector"] = law.util.make_unique(law.util.flatten(self.selector_inst.run_requires()))
 
         return reqs
 
@@ -76,7 +78,7 @@ class SelectEvents(
         }
 
         # add selector dependent requirements
-        reqs["selector"] = self.selector_inst.run_requires()
+        reqs["selector"] = law.util.make_unique(law.util.flatten(self.selector_inst.run_requires()))
 
         return reqs
 
@@ -104,8 +106,7 @@ class SelectEvents(
         )
 
         # prepare inputs and outputs
-        reqs = self.requires()
-        lfn_task = reqs["lfns"]
+        lfn_task = self.requires()["lfns"]
         inputs = self.input()
         outputs = self.output()
         result_chunks = {}
@@ -113,7 +114,8 @@ class SelectEvents(
         stats = defaultdict(float)
 
         # run the selector setup
-        reader_targets = self.selector_inst.run_setup(reqs["selector"], inputs["selector"])
+        selector_reqs = self.selector_inst.run_requires()
+        reader_targets = self.selector_inst.run_setup(selector_reqs, luigi.task.getpaths(selector_reqs))
         n_ext = len(reader_targets)
 
         # show an early warning in case the selector does not produce some mandatory columns
@@ -153,17 +155,14 @@ class SelectEvents(
                 *reader_targets.values(),
             ],
             mode="r",
-        ) as (local_input_file, *inps):
-            # open with uproot
-            with self.publish_step("load and open ..."):
-                nano_file = local_input_file.load(formatter="uproot")
-
+        ) as inps:
             # iterate over chunks of events and diffs
             n_calib = len(inputs["calibrations"])
             for (events, *cols), pos in self.iter_chunked_io(
-                [nano_file, *(inp.path for inp in inps)],
+                [inp.abspath for inp in inps],
                 source_type=["coffea_root"] + ["awkward_parquet"] * n_calib + [None] * n_ext,
                 read_columns=[read_columns] * (1 + n_calib + n_ext),
+                chunk_size=self.selector_inst.get_min_chunk_size(),
             ):
                 # optional check for overlapping inputs within additional columns
                 if self.check_overlapping_inputs:
@@ -200,7 +199,7 @@ class SelectEvents(
                 # save results as parquet via a thread in the same pool
                 chunk = tmp_dir.child(f"res_{lfn_index}_{pos.index}.parquet", type="f")
                 result_chunks[(lfn_index, pos.index)] = chunk
-                self.chunked_io.queue(sorted_ak_to_parquet, (results_array, chunk.path))
+                self.chunked_io.queue(sorted_ak_to_parquet, (results_array, chunk.abspath))
 
                 # remove columns
                 if write_columns:
@@ -213,7 +212,7 @@ class SelectEvents(
                     # save additional columns as parquet via a thread in the same pool
                     chunk = tmp_dir.child(f"cols_{lfn_index}_{pos.index}.parquet", type="f")
                     column_chunks[(lfn_index, pos.index)] = chunk
-                    self.chunked_io.queue(sorted_ak_to_parquet, (events, chunk.path))
+                    self.chunked_io.queue(sorted_ak_to_parquet, (events, chunk.abspath))
 
         # merge the result files
         sorted_chunks = [result_chunks[key] for key in sorted(result_chunks)]
@@ -459,7 +458,7 @@ class MergeSelectionMasks(
 
             chunk = tmp_dir.child(f"tmp_{inp['results'].basename}", type="f")
             chunks.append(chunk)
-            sorted_ak_to_parquet(out, chunk.path)
+            sorted_ak_to_parquet(out, chunk.abspath)
 
         return chunks
 

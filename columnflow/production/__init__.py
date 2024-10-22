@@ -94,13 +94,14 @@ class Producer(TaskArrayFunction):
                         "data_only, nominal_only or shifts_only are set",
                     )
 
-                def skip_func(self):
-                    # check mc_only and data_only
-                    if getattr(self, "dataset_inst", None):
-                        if mc_only and not self.dataset_inst.is_mc:
-                            return True
-                        if data_only and not self.dataset_inst.is_data:
-                            return True
+                if "skip_func" not in cls_dict:
+                    def skip_func(self):
+                        # check mc_only and data_only
+                        if getattr(self, "dataset_inst", None):
+                            if mc_only and not self.dataset_inst.is_mc:
+                                return True
+                            if data_only and not self.dataset_inst.is_data:
+                                return True
 
                     # check nominal_only and shifts_only
                     if getattr(self, "global_shift_inst", None):

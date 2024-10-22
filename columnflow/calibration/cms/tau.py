@@ -62,7 +62,7 @@ class TECConfig:
     # function to determine the correction file
     get_tau_file=(lambda self, external_files: external_files.tau_sf),
     # function to determine the tec config
-    get_tec_config=(lambda self: TECConfig.new(self.config_inst.x.tau_sf)),
+    get_tec_config=(lambda self: TECConfig.new(self.config_inst.x.tec)),
 )
 def tec(
     self: Calibrator,

@@ -656,7 +656,13 @@ class HTCondorWorkflow(AnalysisTask, law.htcondor.HTCondorWorkflow, RemoteWorkfl
             config.render_variables["cf_htcondor_flavor"] = self.htcondor_flavor
         config.render_variables.setdefault("cf_pre_setup_command", "")
         config.render_variables.setdefault("cf_post_setup_command", "")
-        config.render_variables.setdefault("cf_remote_lcg_setup", law.config.get_expanded("job", "remote_lcg_setup"))
+        config.render_variables.setdefault("cf_remote_lcg_setup", remote_lcg_setup)
+        config.render_variables.setdefault(
+            "cf_remote_lcg_setup_force",
+            "1" if law.config.get_expanded_bool("job", "remote_lcg_setup_force") else "",
+        )
+        if self.htcondor_share_software:
+            config.render_variables["cf_software_base"] = os.environ["CF_SOFTWARE_BASE"]
 
         # forward env variables
         for ev, rv in self.htcondor_forward_env_variables.items():
@@ -795,13 +801,8 @@ class SlurmWorkflow(AnalysisTask, law.slurm.SlurmWorkflow, RemoteWorkflowMixin):
         config.render_variables["cf_bootstrap_name"] = "slurm"
         config.render_variables.setdefault("cf_pre_setup_command", "")
         config.render_variables.setdefault("cf_post_setup_command", "")
-
-        # custom tmp dir since slurm uses the job submission dir as the main job directory, and law
-        # puts the tmp directory in this job directory which might become quite long; then,
-        # python's default multiprocessing puts socket files into that tmp directory which comes
-        # with the restriction of less then 80 characters that would be violated, and potentially
-        # would also overwhelm the submission directory
-        config.render_variables["law_job_tmp"] = "/tmp/law_$( basename \"$LAW_JOB_HOME\" )"
+        if self.slurm_flavor not in ("", law.NO_STR):
+            config.render_variables["cf_slurm_flavor"] = self.slurm_flavor
 
         # forward env variables
         for ev, rv in self.slurm_forward_env_variables.items():

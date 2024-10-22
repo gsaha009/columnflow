@@ -51,6 +51,10 @@ class CreateHistograms(
     # (might become a parameter at some point)
     category_id_columns = {"category_ids"}
 
+    # register sandbox and shifts found in the chosen weight producer to this task
+    register_weight_producer_sandbox = True
+    register_weight_producer_shifts = True
+
     @law.util.classproperty
     def mandatory_columns(cls) -> set[str]:
         return set(cls.category_id_columns) | {"process_id"}
@@ -74,6 +78,9 @@ class CreateHistograms(
                     for ml_model_inst in self.ml_model_insts
                 ]
 
+            # add weight_producer dependent requirements
+            reqs["weight_producer"] = law.util.make_unique(law.util.flatten(self.weight_producer_inst.run_requires()))
+
         return reqs
 
     def requires(self):
@@ -93,6 +100,9 @@ class CreateHistograms(
                 for ml_model_inst in self.ml_model_insts
             ]
 
+        # add weight_producer dependent requirements
+        reqs["weight_producer"] = law.util.make_unique(law.util.flatten(self.weight_producer_inst.run_requires()))
+
         return reqs
 
     @MergeReducedEventsUser.maybe_dummy
@@ -110,11 +120,15 @@ class CreateHistograms(
         import awkward as ak
         from columnflow.columnar_util import Route, update_ak_array, add_ak_aliases, has_ak_column
 
-        # prepare inputs and outputs
+        # prepare inputs
         inputs = self.input()
 
         # declare output: dict of histograms
         histograms = {}
+
+        # run the weight_producer setup
+        producer_reqs = self.weight_producer_inst.run_requires()
+        reader_targets = self.weight_producer_inst.run_setup(producer_reqs, luigi.task.getpaths(producer_reqs))
 
         # create a temp dir for saving intermediate files
         tmp_dir = law.LocalDirectoryTarget(is_tmp=True)
@@ -161,8 +175,20 @@ class CreateHistograms(
             if self.check_overlapping_inputs:
                 self.raise_if_overlapping([events] + list(columns))
 
-            # add additional columns
-            events = update_ak_array(events, *columns)
+        # prepare inputs for localization
+        with law.localize_file_targets(
+            [*file_targets, *reader_targets.values()],
+            mode="r",
+        ) as inps:
+            for (events, *columns), pos in self.iter_chunked_io(
+                [inp.path for inp in inps],
+                source_type=len(file_targets) * ["awkward_parquet"] + [None] * len(reader_targets),
+                read_columns=(len(file_targets) + len(reader_targets)) * [read_columns],
+                chunk_size=self.weight_producer_inst.get_min_chunk_size(),
+            ):
+                # optional check for overlapping inputs
+                if self.check_overlapping_inputs:
+                    self.raise_if_overlapping([events] + list(columns))
 
             # add aliases
             events = add_ak_aliases(
@@ -215,24 +241,11 @@ class CreateHistograms(
                     axis=-1,
                 )
 
-                # broadcast arrays so that each event can be filled for all its categories
-                fill_kwargs = {
-                    "category": category_ids,
-                    "process": events.process_id,
-                    "shift": np.ones(len(events), dtype=np.int32) * self.global_shift_inst.id,
-                    "weight": weight,
-                }
-                for variable_inst in variable_insts:
-                    # prepare the expression
-                    expr = variable_inst.expression
-                    if isinstance(expr, str):
-                        route = Route(expr)
-                        def expr(events, *args, **kwargs):
-                            if len(events) == 0 and not has_ak_column(events, route):
-                                return empty_f32
-                            return route.apply(events, null_value=variable_inst.null_value)
-                    # apply it
-                    fill_kwargs[variable_inst.name] = expr(events)
+                # build the full event weight
+                if hasattr(self.weight_producer_inst, "skip_func") and not self.weight_producer_inst.skip_func():
+                    events, weight = self.weight_producer_inst(events)
+                else:
+                    weight = ak.Array(np.ones(len(events), dtype=np.float32))
 
                 # broadcast and fill
                 arrays = ak.flatten(ak.cartesian(fill_kwargs))
@@ -290,31 +303,43 @@ class MergeHistograms(
         # create a dummy branch map so that this task could be submitted as a job
         return {0: None}
 
+    def _get_variables(self):
+        if self.is_workflow():
+            return self.as_branch()._get_variables()
+
+        variables = self.variables
+
+        # optional dynamic behavior: determine not yet created variables and require only those
+        if self.only_missing:
+            missing = self.output().count(existing=False, keys=True)[1]
+            variables = sorted(missing, key=variables.index)
+
+        return variables
+
     def workflow_requires(self):
         reqs = super().workflow_requires()
 
-        reqs["hists"] = self.as_branch().requires()
+        if not self.pilot:
+            variables = self._get_variables()
+            if variables:
+                reqs["hists"] = self.reqs.CreateHistograms.req_different_branching(
+                    self,
+                    branch=-1,
+                    variables=tuple(variables),
+                )
 
         return reqs
 
     def requires(self):
-        # optional dynamic behavior: determine not yet created variables and require only those
-        prefer_cli = {"variables"}
-        variables = self.variables
-        if self.only_missing:
-            prefer_cli.clear()
-            missing = self.output().count(existing=False, keys=True)[1]
-            variables = tuple(sorted(missing, key=variables.index))
-
+        variables = self._get_variables()
         if not variables:
             return []
 
-        return self.reqs.CreateHistograms.req(
+        return self.reqs.CreateHistograms.req_different_branching(
             self,
             branch=-1,
             variables=tuple(variables),
-            _exclude={"branches"},
-            _prefer_cli=prefer_cli,
+            workflow="local",
         )
 
     def output(self):

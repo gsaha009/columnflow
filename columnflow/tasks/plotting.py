@@ -143,11 +143,36 @@ class PlotVariablesBase(
                     "  - selected --processes did not match any value on the process axis of the input histogram",
                 )
 
-            # sort hists by process order
-            hists = OrderedDict(
-                (process_inst.copy_shallow(), hists[process_inst])
-                for process_inst in sorted(hists, key=process_insts.index)
-            )
+            # update histograms using custom hooks
+            hists = self.invoke_hist_hooks(hists)
+
+            # add new processes to the end of the list
+            for process_inst in hists:
+                if process_inst not in process_insts:
+                    process_insts.append(process_inst)
+
+            # axis selections and reductions, including sorting by process order
+            _hists = OrderedDict()
+            for process_inst in sorted(hists, key=process_insts.index):
+                h = hists[process_inst]
+                # selections
+                h = h[{
+                    "category": [
+                        hist.loc(c.id)
+                        for c in leaf_category_insts
+                        if c.id in h.axes["category"]
+                    ],
+                    "shift": [
+                        hist.loc(s.id)
+                        for s in plot_shifts
+                        if s.id in h.axes["shift"]
+                    ],
+                }]
+                # reductions
+                h = h[{"category": sum}]
+                # store
+                _hists[process_inst] = h
+            hists = _hists
 
             # call the plot function
             fig, _ = self.call_plot_func(
@@ -183,6 +208,15 @@ class PlotVariablesBaseSingleShift(
             for cat_name in sorted(self.categories)
         ]
 
+    def workflow_requires(self):
+        reqs = super().workflow_requires()
+
+        # no need to require merged histograms since each branch already requires them as a workflow
+        if self.workflow == "local":
+            reqs.pop("merged_hists", None)
+
+        return reqs
+
     def requires(self):
         return {
             d: self.reqs.MergeHistograms.req(
@@ -194,6 +228,19 @@ class PlotVariablesBaseSingleShift(
             )
             for d in self.datasets
         }
+
+    def plot_parts(self) -> law.util.InsertableDict:
+        parts = super().plot_parts()
+
+        parts["processes"] = f"proc_{self.processes_repr}"
+        parts["category"] = f"cat_{self.branch_data.category}"
+        parts["variable"] = f"var_{self.branch_data.variable}"
+
+        hooks_repr = self.hist_hooks_repr
+        if hooks_repr:
+            parts["hook"] = f"hooks_{hooks_repr}"
+
+        return parts
 
     def output(self):
         b = self.branch_data
@@ -267,6 +314,15 @@ class PlotVariablesBaseMultiShifts(
             for source in sorted(self.shift_sources)
         ]
 
+    def workflow_requires(self):
+        reqs = super().workflow_requires()
+
+        # no need to require merged histograms since each branch already requires them as a workflow
+        if self.workflow == "local":
+            reqs.pop("merged_hists", None)
+
+        return reqs
+
     def requires(self):
         return {
             d: self.reqs.MergeShiftedHistograms.req(
@@ -278,6 +334,20 @@ class PlotVariablesBaseMultiShifts(
             )
             for d in self.datasets
         }
+
+    def plot_parts(self) -> law.util.InsertableDict:
+        parts = super().plot_parts()
+
+        parts["processes"] = f"proc_{self.processes_repr}"
+        parts["shift_source"] = f"unc_{self.branch_data.shift_source}"
+        parts["category"] = f"cat_{self.branch_data.category}"
+        parts["variable"] = f"var_{self.branch_data.variable}"
+
+        hooks_repr = self.hist_hooks_repr
+        if hooks_repr:
+            parts["hook"] = f"hooks_{hooks_repr}"
+
+        return parts
 
     def output(self):
         b = self.branch_data
@@ -314,12 +384,7 @@ class PlotShiftedVariables1D(
     )
 
 
-class PlotShiftedVariablesPerProcess1D(
-    law.WrapperTask,
-    PlotShiftedVariables1D,
-):
-    # force this one to be a local workflow
-    workflow = "local"
+class PlotShiftedVariablesPerProcess1D(law.WrapperTask):
 
     # upstream requirements
     reqs = Requirements(

@@ -12,7 +12,7 @@ import luigi
 import law
 
 from columnflow.tasks.framework.base import (
-    Requirements, AnalysisTask, DatasetTask, ShiftTask, wrapper_factory,
+    Requirements, AnalysisTask, DatasetTask, ShiftTask, wrapper_factory, RESOLVE_DEFAULT,
 )
 from columnflow.tasks.framework.mixins import (
     CalibratorsMixin, SelectorStepsMixin, VariablesMixin, CategoriesMixin, ChunkedIOMixin,
@@ -35,6 +35,16 @@ class CreateCutflowHistograms(
     law.LocalWorkflow,
     RemoteWorkflow,
 ):
+    # overwrite selector steps to use default resolution
+    selector_steps = law.CSVParameter(
+        default=(RESOLVE_DEFAULT,),
+        description="a subset of steps of the selector to apply; uses all steps when empty; "
+        "default: value of the 'default_selector_steps' config",
+        brace_expand=True,
+        parse_empty=True,
+    )
+    last_edge_inclusive = last_edge_inclusive_inst
+
     sandbox = dev_sandbox(law.config.get("analysis", "default_columnar_sandbox"))
 
     selector_steps_order_sensitive = True
@@ -237,6 +247,8 @@ class PlotCutflowBase(
     law.LocalWorkflow,
     RemoteWorkflow,
 ):
+    selector_steps = CreateCutflowHistograms.selector_steps
+
     sandbox = dev_sandbox(law.config.get("analysis", "default_columnar_sandbox"))
 
     exclude_index = True

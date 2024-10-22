@@ -63,6 +63,7 @@ class OutputLocation(enum.Enum):
     config = "config"
     local = "local"
     wlcg = "wlcg"
+    wlcg_mirrored = "wlcg_mirrored"
 
 
 class AnalysisTask(BaseTask, law.SandboxTask):
@@ -131,18 +132,24 @@ class AnalysisTask(BaseTask, law.SandboxTask):
         _prefer_cli = law.util.make_set(kwargs.get("_prefer_cli", [])) | {
             "version", "workflow", "job_workers", "poll_interval", "walltime", "max_runtime",
             "retries", "acceptance", "tolerance", "parallel_jobs", "shuffle_jobs", "htcondor_cpus",
-            "htcondor_gpus", "htcondor_memory", "htcondor_pool",
+            "htcondor_gpus", "htcondor_memory", "htcondor_pool", "pilot",
         }
         kwargs["_prefer_cli"] = _prefer_cli
 
         # build the params
         params = super().req_params(inst, **kwargs)
 
-        # overwrite the version when set in the config
-        if isinstance(getattr(cls, "version", None), luigi.Parameter) and "version" not in kwargs:
-            config_version = cls.get_version_map_value(inst, params)
-            if config_version:
-                params["version"] = config_version
+        # when not explicitly set in kwargs and no global value was defined on the cli for the task
+        # family, evaluate and use the default value
+        if (
+            isinstance(getattr(cls, "version", None), luigi.Parameter) and
+            "version" not in kwargs and
+            not law.parser.global_cmdline_values().get(f"{cls.task_family}_version") and
+            cls.task_family != law.parser.root_task().task_family
+        ):
+            default_version = cls.get_default_version(inst, params)
+            if default_version and default_version != law.NO_STR:
+                params["version"] = default_version
 
         return params
 
@@ -255,7 +262,7 @@ class AnalysisTask(BaseTask, law.SandboxTask):
                     _cache["all_object_names"] = {
                         obj.name
                         for obj, _, _ in
-                        getattr(container, "walk_{}".format(plural))()
+                        getattr(container, f"walk_{plural}")()
                     }
                 else:
                     _cache["all_object_names"] = set(getattr(container, plural).names())
@@ -267,7 +274,7 @@ class AnalysisTask(BaseTask, law.SandboxTask):
                 if object_cls in container._deep_child_classes:
                     kwargs["deep"] = deep
                 _cache["has_obj_func"] = functools.partial(
-                    getattr(container, "has_{}".format(singular)),
+                    getattr(container, f"has_{singular}"),
                     **kwargs,
                 )
             return _cache["has_obj_func"](name)
@@ -400,7 +407,7 @@ class AnalysisTask(BaseTask, law.SandboxTask):
 
         # interpret missing parameters (e.g. NO_STR) as None
         # (special case: an empty string is usually an active decision, but counts as missing too)
-        if law.is_no_param(param) or resolve_default or param == "":
+        if law.is_no_param(param) or resolve_default or param == "" or param == ():
             param = None
 
         # actual resolution
@@ -641,6 +648,31 @@ class AnalysisTask(BaseTask, law.SandboxTask):
             (fs,) = (location[1:] + [None])[:1]
             kwargs.setdefault("fs", fs)
             return self.wlcg_target(*path, **kwargs)
+
+        if location[0] == OutputLocation.wlcg_mirrored:
+            # get other options
+            loc, wlcg_fs, store_parts_modifier = (location[1:] + [None, None, None])[:3]
+            kwargs.setdefault("store_parts_modifier", store_parts_modifier)
+            # create the local target
+            local_kwargs = kwargs.copy()
+            loc_key = "fs" if (loc and law.config.has_section(loc)) else "store"
+            local_kwargs.setdefault(loc_key, loc)
+            local_target = self.local_target(*path, **local_kwargs)
+            # create the wlcg target
+            wlcg_kwargs = kwargs.copy()
+            wlcg_kwargs.setdefault("fs", wlcg_fs)
+            wlcg_target = self.wlcg_target(*path, **wlcg_kwargs)
+            # build the mirrored target from these two
+            mirrored_target_cls = (
+                law.MirroredFileTarget
+                if isinstance(local_target, law.LocalFileTarget)
+                else law.MirroredDirectoryTarget
+            )
+            return mirrored_target_cls(
+                path=local_target.path,
+                remote_target=wlcg_target,
+                local_target=local_target,
+            )
 
         raise Exception(f"cannot determine output location based on '{location}'")
 

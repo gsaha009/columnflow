@@ -4,6 +4,9 @@
 Tasks related to producing new columns.
 """
 
+import itertools
+
+import luigi
 import law
 
 from columnflow.tasks.framework.base import Requirements, AnalysisTask, wrapper_factory
@@ -34,7 +37,8 @@ class ProduceColumns(
         MergeReducedEvents=MergeReducedEvents,
     )
 
-    # register shifts found in the chosen producer to this task
+    # register sandbox and shifts found in the chosen producer to this task
+    register_producer_sandbox = True
     register_producer_shifts = True
 
     # strategy for handling missing source columns when adding aliases on event chunks
@@ -47,14 +51,14 @@ class ProduceColumns(
         reqs["events"] = self.reqs.MergeReducedEvents.req(self, tree_index=-1)
 
         # add producer dependent requirements
-        reqs["producer"] = self.producer_inst.run_requires()
+        reqs["producer"] = law.util.make_unique(law.util.flatten(self.producer_inst.run_requires()))
 
         return reqs
 
     def requires(self):
         return {
-            "events": self.reqs.MergeReducedEvents.req(self, tree_index=self.branch, _exclude={"branch"}),
-            "producer": self.producer_inst.run_requires(),
+            "events": self.reqs.ProvideReducedEvents.req(self),
+            "producer": law.util.make_unique(law.util.flatten(self.producer_inst.run_requires())),
         }
 
     @MergeReducedEventsUser.maybe_dummy
@@ -77,13 +81,13 @@ class ProduceColumns(
         )
 
         # prepare inputs and outputs
-        reqs = self.requires()
         inputs = self.input()
         output = self.output()
         output_chunks = {}
 
         # run the producer setup
-        reader_targets = self.producer_inst.run_setup(reqs["producer"], inputs["producer"])
+        producer_reqs = self.producer_inst.run_requires()
+        reader_targets = self.producer_inst.run_setup(producer_reqs, luigi.task.getpaths(producer_reqs))
         n_ext = len(reader_targets)
 
         # create a temp dir for saving intermediate files
@@ -112,6 +116,7 @@ class ProduceColumns(
                 [inp.path for inp in inps],
                 source_type=["awkward_parquet"] + [None] * n_ext,
                 read_columns=[read_columns] * (1 + n_ext),
+                chunk_size=self.producer_inst.get_min_chunk_size(),
             ):
                 # optional check for overlapping inputs
                 if self.check_overlapping_inputs:

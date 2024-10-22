@@ -70,7 +70,7 @@ def get_events_from_categories(
     return events[mask]
 
 
-def get_root_processes_from_campaign(campaign: od.Campaign) -> od.UniqueObjectIndex:
+def get_root_processes_from_campaign(campaign: od.config.Campaign) -> od.unique.UniqueObjectIndex:
     """
     Extracts all root process objects from datasets contained in an order *campaign* and returns
     them in a unique object index.
@@ -94,14 +94,13 @@ def get_root_processes_from_campaign(campaign: od.Campaign) -> od.UniqueObjectIn
 
 
 def get_datasets_from_process(
-    config: od.Config,
-    process: str | od.Process,
+    config: od.config.Config,
+    process: str | od.process.Process,
     strategy: str = "inclusive",
     only_first: bool = True,
     check_deep: bool = False,
-) -> list[od.Dataset]:
-    r"""
-    Given a *process* and the *config* it belongs to, returns a list of order dataset objects that
+) -> list[od.dataset.Dataset]:
+    r"""Given a *process* and the *config* it belongs to, returns a list of order dataset objects that
     contain matching processes. This is done by walking through *process* and its child processes
     and checking whether they are contained in known datasets. *strategy* controls how possible
     ambiguities are resolved:
