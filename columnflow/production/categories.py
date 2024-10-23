@@ -36,8 +36,10 @@ def category_ids(
     """
     Assigns each event an array of category ids.
     """
-    category_ids = []
+    category_ids_list = []
 
+    category_ids = ak.singletons(np.ones(len(events), dtype=np.int64))[:, :0]
+    
     for cat_inst, categorizers in self.categorizer_map.items():
         # start with a true mask
         cat_mask = np.ones(len(events), dtype=bool)
@@ -49,11 +51,16 @@ def category_ids(
 
         # covert to nullable array with the category ids or none, then apply ak.singletons
         ids = ak.where(cat_mask, np.float64(cat_inst.id), np.float64(np.nan))
-        category_ids.append(ak.singletons(ak.nan_to_none(ids)))
+        category_ids_list.append(ak.singletons(ak.nan_to_none(ids)))
 
+        if len(category_ids_list) == 100:
+            category_ids = ak.concatenate([category_ids, *category_ids_list], axis=1)
+            category_ids_list = []
+
+        
     # combine
-    category_ids = ak.concatenate(category_ids, axis=1)
-
+    category_ids = ak.concatenate([category_ids, *category_ids_list], axis=1)
+    
     # save, optionally on a target events array
     if target_events is None:
         target_events = events
