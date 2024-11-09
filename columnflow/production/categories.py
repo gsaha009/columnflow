@@ -36,7 +36,9 @@ def category_ids(
     """
     Assigns each event an array of category ids.
     """
+    debug = kwargs.get("debug", False)
     category_ids_list = []
+    category_ids_debug_dict = {} # noqa
 
     category_ids = ak.singletons(np.ones(len(events), dtype=np.int64))[:, :0]
     
@@ -49,6 +51,9 @@ def category_ids(
             events, mask = self[categorizer](events, **kwargs)
             cat_mask = cat_mask & mask
 
+        if debug:
+            category_ids_debug_dict[cat_inst.name] = {"id": cat_inst.id, "nevents": int(ak.sum(cat_mask))} # noqa
+        
         # covert to nullable array with the category ids or none, then apply ak.singletons
         ids = ak.where(cat_mask, np.float64(cat_inst.id), np.float64(np.nan))
         category_ids_list.append(ak.singletons(ak.nan_to_none(ids)))
@@ -66,7 +71,7 @@ def category_ids(
         target_events = events
     target_events = set_ak_column(target_events, "category_ids", category_ids, value_type=np.int64)
 
-    return target_events
+    return target_events, category_ids_debug_dict
 
 
 @category_ids.init
