@@ -86,12 +86,20 @@ def get_br_from_inclusive_dataset(
         if proc.id not in proc_ds_map or proc.is_leaf_process:
             continue
 
+        """
         # get the mc weights for the "mother" dataset and add an entry for the process
         sum_mc_weight = stats[proc_ds_map[proc.id].name]["sum_mc_weight"]
         sum_mc_weight_per_process = stats[proc_ds_map[proc.id].name]["sum_mc_weight_per_process"]
         # use the number of events to compute the error on the branching ratio
         num_events = stats[proc_ds_map[proc.id].name]["num_events"]
         num_events_per_process = stats[proc_ds_map[proc.id].name]["num_events_per_process"]
+        """
+        # get the mc weights for the "mother" dataset and add an entry for the process
+        sum_mc_weight = stats[proc_ds_map[proc.id].name]["sum_filtered_mc_weight"]
+        sum_mc_weight_per_process = stats[proc_ds_map[proc.id].name]["sum_filtered_mc_weight_per_process"]
+        # use the number of events to compute the error on the branching ratio
+        num_events = stats[proc_ds_map[proc.id].name]["num_filtered_events"]
+        num_events_per_process = stats[proc_ds_map[proc.id].name]["num_filtered_events_per_process"]
 
         # compute the branching ratios for the children wrt the mother process
         for child_proc in child_procs:
@@ -197,6 +205,11 @@ def normalization_weights(self: Producer, events: ak.Array, **kwargs) -> ak.Arra
     norm_weight = events.mc_weight * process_weight
     events = set_ak_column(events, self.weight_name, norm_weight, value_type=np.float32)
 
+    # If we are stitching, we also compute the inclusive weight for debugging purposes
+    if self.allow_stitching and self.dataset_inst == self.inclusive_dataset:
+        incl_norm_weight = events.mc_weight * self.inclusive_weight
+        events = set_ak_column(events, self.weight_name_incl, incl_norm_weight, value_type=np.float32)
+
     return events
 
 
@@ -206,10 +219,10 @@ def normalization_weights_requires(self: Producer, reqs: dict) -> None:
     Adds the requirements needed by the underlying py:attr:`task` to access selection stats into
     *reqs*.
     """
-    if self.allow_stitching:
-        self.stitching_datasets = self.get_stitching_datasets()
-    else:
-        self.stitching_datasets = [self.dataset_inst]
+    #if self.allow_stitching:
+    #    self.stitching_datasets = self.get_stitching_datasets()
+    #else:
+    #    self.stitching_datasets = [self.dataset_inst]
 
     # check that all datasets are known
     for dataset in self.stitching_datasets:
@@ -292,7 +305,8 @@ def normalization_weights_setup(
     # create a event weight lookup table
     process_weight_table = sp.sparse.lil_matrix((1, max_id + 1), dtype=np.float32)
     if self.allow_stitching and self.get_xsecs_from_inclusive_dataset:
-        inclusive_dataset = self.get_inclusive_dataset()
+        #inclusive_dataset = self.get_inclusive_dataset()
+        inclusive_dataset = self.inclusive_dataset
         logger.info(f"using inclusive dataset {inclusive_dataset.name} for cross section lookup")
 
         # get the branching ratios from the inclusive sample
@@ -310,14 +324,35 @@ def normalization_weights_setup(
                     f"{inclusive_dataset}",
                 )
         inclusive_xsec = inclusive_proc.get_xsec(self.config_inst.campaign.ecm).nominal
+        self.inclusive_weight = (
+            lumi * inclusive_xsec / normalization_selection_stats[inclusive_dataset.name]["sum_mc_weight"]
+            if self.dataset_inst == inclusive_dataset
+            else 0
+        )
         for process_id, br in branching_ratios.items():
-            sum_weights = merged_selection_stats["sum_mc_weight_per_process"][str(process_id)]
-            process_weight_table[0, process_id] = lumi * inclusive_xsec * br / sum_weights
+            #sum_weights = merged_selection_stats["sum_mc_weight_per_process"][str(process_id)]
+            #process_weight_table[0, process_id] = lumi * inclusive_xsec * br / sum_weights
+
+            # new
+            logger.info(f"process_id : {process_id}, br : {br}")
+            sum_weights_total = merged_selection_stats["sum_mc_weight_per_process"][str(process_id)]
+            logger.info(f"sum_weights_total : {sum_weights_total}")
+            sum_weights_filtered_per_proc = merged_selection_stats["sum_filtered_mc_weight_per_process"][str(process_id)]
+            logger.info(f"sum_weights_filtered_per_proc : {sum_weights_filtered_per_proc}")
+            sum_weights = sum_weights_total * sum_weights_filtered_per_proc/merged_selection_stats["sum_filtered_mc_weight"]
+            if sum_weights > 0.0:
+                logger.info(f"sum_weights : {sum_weights}")
+            else:
+                logger.warning(f"{sum_weights} sum_weights : keeping the wt as zero")
+                
+            process_weight_table[0, process_id] = lumi * inclusive_xsec * br / sum_weights if sum_weights > 0.0 else 0.0
+            
+            
     else:
         for process_inst in process_insts:
             if self.config_inst.campaign.ecm not in process_inst.xsecs.keys():
                 continue
-            sum_weights = merged_selection_stats["sum_mc_weight_per_process"][str(process_inst.id)]
+            #sum_weights = merged_selection_stats["sum_mc_weight_per_process"][str(process_inst.id)]
             #quick fix that need to be fixed
             ################################
             #n_evt_per_file = /self.dataset_inst.n_files
@@ -335,8 +370,23 @@ def normalization_weights_init(self: Producer) -> None:
     """
     Initializes the normalization weights producer by setting up the normalization weight column.
     """
-    self.produces.add(self.weight_name)
+    if getattr(self, "dataset_inst", None) is None:
+        return
+    
 
+    self.produces.add(self.weight_name)
+    if self.allow_stitching:
+        self.stitching_datasets = self.get_stitching_datasets()
+        self.inclusive_dataset = self.get_inclusive_dataset()
+    else:
+        self.stitching_datasets = [self.dataset_inst]
+
+    if self.allow_stitching and self.dataset_inst == self.inclusive_dataset:
+        self.weight_name_incl = f"{self.weight_name}_inclusive_only"
+        self.produces.add(self.weight_name_incl)
+
+
+    
 
 stitched_normalization_weights = normalization_weights.derive(
     "stitched_normalization_weights", cls_dict={
