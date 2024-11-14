@@ -335,7 +335,8 @@ def normalization_weights_setup(
 
             # new
             logger.info(f"process_id : {process_id}, br : {br}")
-            sum_weights_total = merged_selection_stats["sum_mc_weight_per_process"][str(process_id)]
+            #sum_weights_total = merged_selection_stats["sum_mc_weight_per_process"][str(process_id)]
+            sum_weights_total = merged_selection_stats["sum_mc_weight"]
             logger.info(f"sum_weights_total : {sum_weights_total}")
             sum_weights_filtered_per_proc = merged_selection_stats["sum_filtered_mc_weight_per_process"][str(process_id)]
             logger.info(f"sum_weights_filtered_per_proc : {sum_weights_filtered_per_proc}")
