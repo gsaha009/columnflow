@@ -257,7 +257,7 @@ def plot_all(
         rax.axhline(y=1.0, linestyle="dashed", color="gray")
         rax_kwargs = {
             #"ylim": (0.72, 1.28),
-            "ylim": (0.54, 1.46),
+            "ylim": (0.5, 1.5),
             "ylabel": "Ratio",
             "xlabel": "Variable",
             "yscale": "linear",

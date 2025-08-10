@@ -713,7 +713,7 @@ def jer(self: Calibrator, events: ak.Array, **kwargs) -> ak.Array:
 
 
     # new genmatch mask
-    no_genmatch_eta_gt_2p5_mask = ((np.abs(events.Jet.eta) > 2.5) & (events.Jet.isgenmatched == 0))
+    no_genmatch_eta_gt_2p5_mask = ((np.abs(events.Jet.eta) > 2.5) & (np.abs(events.Jet.eta) < 3.0) & (events.Jet.isgenmatched == 0))
     _pt_jer_up     = ak.where(no_genmatch_eta_gt_2p5_mask, events.Jet.pt,   events.Jet.pt   * smear_factors[:, :, 1])
     _mass_jer_up   = ak.where(no_genmatch_eta_gt_2p5_mask, events.Jet.mass, events.Jet.mass * smear_factors[:, :, 1])
     _pt_jer_down   = ak.where(no_genmatch_eta_gt_2p5_mask, events.Jet.pt,   events.Jet.pt   * smear_factors[:, :, 2])
